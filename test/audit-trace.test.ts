@@ -7,13 +7,14 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   buildAuditContext,
   emitMessageCompletedAudit,
   emitTraceStep,
   traceArtifactPath,
   truncateAuditText,
+  type AuditContext,
 } from '../src/core/audit-trace';
 import { currentLogContext, log, withTrace } from '../src/core/logger';
 
@@ -65,6 +66,15 @@ describe('truncateAuditText', () => {
 });
 
 describe('buildAuditContext', () => {
+  it('exposes required message identity fields in AuditContext', () => {
+    expectTypeOf<AuditContext>().toMatchTypeOf<{
+      msgId: string;
+      chatId: string;
+      threadId: string | null;
+      senderId: string | null;
+    }>();
+  });
+
   it('preserves message identity and merges extras', () => {
     const audit = buildAuditContext(
       {
@@ -208,6 +218,20 @@ describe('traceArtifactPath', () => {
     expect(relative).toBe('traces/artifacts/20250706/om_undefined/result.json');
     expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe('null');
   });
+
+  it('stringifies non-string message and artifact names before sanitizing', () => {
+    const workspaceRoot = tempRoot();
+    const relative = traceArtifactPath(
+      12345,
+      67890,
+      'content',
+      'text',
+      { workspaceRoot, now: () => fixedNow },
+    );
+
+    expect(relative).toBe('traces/artifacts/20250706/12345/67890');
+    expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe('content');
+  });
 });
 
 describe('emitMessageCompletedAudit', () => {
@@ -317,11 +341,31 @@ describe('emitMessageCompletedAudit', () => {
     );
   });
 
+  it('emits an empty imageFiles array when completion fields omit it', () => {
+    const workspaceRoot = tempRoot();
+    vi.spyOn(log, 'info').mockImplementation(() => undefined);
+    emitMessageCompletedAudit(
+      {
+        msgId: 'om_no_images',
+        chatId: 'oc_no_images',
+        threadId: null,
+        senderId: null,
+      },
+      { replyText: 'answer' },
+      { workspaceRoot, now: () => fixedNow },
+    );
+
+    const entry = JSON.parse(
+      readFileSync(join(workspaceRoot, 'traces', 'logs', 'trace-20250706.log'), 'utf8'),
+    ) as { response_json: { imageFiles: unknown[] } };
+    expect(entry.response_json.imageFiles).toEqual([]);
+  });
+
   it('truncates a long reply in both audit and trace payloads', () => {
     const workspaceRoot = tempRoot();
     const info = vi.spyOn(log, 'info').mockImplementation(() => undefined);
     emitMessageCompletedAudit(
-      { msgId: 'om_4', chatId: 'oc_4', threadId: null },
+      { msgId: 'om_4', chatId: 'oc_4', threadId: null, senderId: null },
       { replyText: 'x'.repeat(20_001) },
       { workspaceRoot, now: () => fixedNow },
     );
@@ -357,7 +401,7 @@ describe('best-effort disk handling', () => {
     ).toBeNull();
     expect(() =>
       emitMessageCompletedAudit(
-        { msgId: 'om_1', chatId: 'oc_1', threadId: null },
+        { msgId: 'om_1', chatId: 'oc_1', threadId: null, senderId: null },
         { replyText: 'hello' },
         { workspaceRoot: invalidRoot, now: () => fixedNow },
       ),

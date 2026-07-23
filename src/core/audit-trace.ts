@@ -22,7 +22,12 @@ export interface AuditMessage {
 }
 
 export type AuditFields = Record<string, unknown>;
-export type AuditContext = AuditFields;
+export type AuditContext = Record<string, unknown> & {
+  msgId: string;
+  chatId: string;
+  threadId: string | null;
+  senderId: string | null;
+};
 
 function workspaceRoot(io: TraceIo): string {
   return io.workspaceRoot ?? join(paths.appDir, 'my_workspace');
@@ -39,8 +44,8 @@ function dateKey(date: Date): string {
   return `${year}${month}${day}`;
 }
 
-function safeName(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 160) || '_';
+function safeName(value: unknown, fallback: string): string {
+  return String(value || fallback).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 160);
 }
 
 export function truncateAuditText(
@@ -103,8 +108,8 @@ export function emitTraceStep(step: AuditFields = {}, io: TraceIo = {}): void {
 }
 
 export function traceArtifactPath(
-  msgId: string,
-  name: string,
+  msgId: unknown,
+  name: unknown,
   content: unknown,
   kind: 'text' | 'json' = 'text',
   io: TraceIo = {},
@@ -117,9 +122,9 @@ export function traceArtifactPath(
       'traces',
       'artifacts',
       dateKey(now),
-      safeName(msgId),
+      safeName(msgId, 'unknown-message'),
     );
-    const file = join(dir, safeName(name));
+    const file = join(dir, safeName(name, 'artifact'));
     const body =
       kind === 'json' ? JSON.stringify(content ?? null, null, 2) : String(content ?? '');
     mkdirSync(dir, { recursive: true });
@@ -168,7 +173,7 @@ export function emitMessageCompletedAudit(
           terminal: payload.terminal,
           textChars: payload.textChars,
           images: payload.images,
-          imageFiles: payload.imageFiles,
+          imageFiles: payload.imageFiles ?? [],
         },
       },
       io,
