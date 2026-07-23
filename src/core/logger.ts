@@ -45,6 +45,10 @@ export interface LogContext {
 
 const als = new AsyncLocalStorage<LogContext>();
 
+export function currentLogContext(): Readonly<LogContext> {
+  return { ...(als.getStore() ?? {}) };
+}
+
 let stream: WriteStream | null = null;
 let currentDate = '';
 
