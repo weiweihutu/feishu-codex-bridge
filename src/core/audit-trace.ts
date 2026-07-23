@@ -45,7 +45,8 @@ function dateKey(date: Date): string {
 }
 
 function safeName(value: unknown, fallback: string): string {
-  return String(value || fallback).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 160);
+  const safe = String(value || fallback).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 160);
+  return safe === '.' || safe === '..' ? fallback : safe;
 }
 
 export function truncateAuditText(

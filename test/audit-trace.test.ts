@@ -232,6 +232,40 @@ describe('traceArtifactPath', () => {
     expect(relative).toBe('traces/artifacts/20250706/12345/67890');
     expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe('content');
   });
+
+  it('replaces dot-only path segments so artifacts stay under the dated message directory', () => {
+    const workspaceRoot = tempRoot();
+    const relative = traceArtifactPath(
+      '..',
+      '..',
+      'safe content',
+      'text',
+      { workspaceRoot, now: () => fixedNow },
+    );
+
+    expect(relative).toBe(
+      'traces/artifacts/20250706/unknown-message/artifact',
+    );
+    expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe('safe content');
+  });
+
+  it('keeps ordinary dot-prefixed names compatible', () => {
+    const workspaceRoot = tempRoot();
+    const relative = traceArtifactPath(
+      '.message',
+      '.result.json',
+      { ok: true },
+      'json',
+      { workspaceRoot, now: () => fixedNow },
+    );
+
+    expect(relative).toBe(
+      'traces/artifacts/20250706/.message/.result.json',
+    );
+    expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe(
+      '{\n  "ok": true\n}',
+    );
+  });
 });
 
 describe('emitMessageCompletedAudit', () => {
