@@ -28,6 +28,7 @@ function tempRoot(): string {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -107,6 +108,23 @@ describe('buildAuditContext', () => {
     expect(audit.threadId).toBeNull();
     expect(audit.senderId).toBeNull();
   });
+
+  it('falls back to message content when text is nullish', () => {
+    const audit = buildAuditContext(
+      {
+        messageId: 'om_content',
+        chatId: 'oc_content',
+        chatType: 'group',
+        mentionedBot: true,
+        content: 'message fallback',
+        createTime: Date.parse('2025-07-02T00:00:00.000Z'),
+      },
+      undefined,
+    );
+
+    expect(audit.messageText).toBe('message fallback');
+    expect(audit.messageTextTruncated).toBe(false);
+  });
 });
 
 describe('emitTraceStep', () => {
@@ -126,6 +144,21 @@ describe('emitTraceStep', () => {
       msgId: 'om_1',
       input_text: 'prompt',
     });
+  });
+
+  it('uses the local calendar date when UTC and local dates differ', () => {
+    vi.stubEnv('TZ', 'Asia/Shanghai');
+    const workspaceRoot = tempRoot();
+    const localJulySix = new Date('2025-07-05T16:30:00.000Z');
+
+    emitTraceStep({}, { workspaceRoot, now: () => localJulySix });
+
+    expect(
+      readFileSync(
+        join(workspaceRoot, 'traces', 'logs', 'trace-20250706.log'),
+        'utf8',
+      ),
+    ).toContain('"event":"trace_step"');
   });
 
   it('truncates 20001-character input and output text', () => {
@@ -161,6 +194,20 @@ describe('traceArtifactPath', () => {
       '{\n  "ok": true,\n  "nested": {\n    "count": 2\n  }\n}',
     );
   });
+
+  it('writes undefined JSON content as null', () => {
+    const workspaceRoot = tempRoot();
+    const relative = traceArtifactPath(
+      'om_undefined',
+      'result.json',
+      undefined,
+      'json',
+      { workspaceRoot, now: () => fixedNow },
+    );
+
+    expect(relative).toBe('traces/artifacts/20250706/om_undefined/result.json');
+    expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe('null');
+  });
 });
 
 describe('emitMessageCompletedAudit', () => {
@@ -186,6 +233,8 @@ describe('emitMessageCompletedAudit', () => {
         audit,
         {
           replyText: 'answer',
+          startedAt: '2025-07-06T12:34:50.000Z',
+          completedAt: '2025-07-06T12:34:56.000Z',
           elapsedMs: 123,
           model: 'gpt-test',
           terminal: 'done',
@@ -216,20 +265,54 @@ describe('emitMessageCompletedAudit', () => {
     expect(JSON.parse(line)).toEqual(
       expect.objectContaining({
         ts: fixedNow.toISOString(),
-        event: 'codex.response_composed',
+        event: 'trace_step',
         status: 'success',
-        msgId: 'ctx-msg',
-        chatId: 'ctx-chat',
-        threadId: 'omt_3',
+        msg_id: 'ctx-msg',
+        chat_id: 'ctx-chat',
+        thread_id: 'omt_3',
         project: 'demo',
-        traceId: 'trace-3',
-        elapsedMs: 123,
+        trace_id: 'trace-3',
+        step_name: 'codex.response_composed',
+        step_type: 'compose',
+        started_at: '2025-07-06T12:34:50.000Z',
+        completed_at: '2025-07-06T12:34:56.000Z',
+        elapsed_ms: 123,
         model: 'gpt-test',
-        replyText: 'answer',
-        terminal: 'done',
-        textChars: 6,
-        images: 1,
-        imageFiles: ['answer.png'],
+        output_text: 'answer',
+        response_json: {
+          terminal: 'done',
+          textChars: 6,
+          images: 1,
+          imageFiles: ['answer.png'],
+        },
+      }),
+    );
+  });
+
+  it('accepts undefined audit and lets fields override the current log context', async () => {
+    const workspaceRoot = tempRoot();
+    const info = vi.spyOn(log, 'info').mockImplementation(() => undefined);
+
+    await withTrace({ traceId: 'context-trace', chatId: 'context-chat', msgId: 'context-msg' }, async () => {
+      emitMessageCompletedAudit(
+        undefined,
+        {
+          traceId: 'field-trace',
+          chatId: 'field-chat',
+          msgId: 'field-msg',
+          replyText: 'answer',
+        },
+        { workspaceRoot, now: () => fixedNow },
+      );
+    });
+
+    expect(info).toHaveBeenCalledWith(
+      'audit',
+      'message_completed',
+      expect.objectContaining({
+        traceId: 'field-trace',
+        chatId: 'field-chat',
+        msgId: 'field-msg',
       }),
     );
   });
@@ -251,8 +334,8 @@ describe('emitMessageCompletedAudit', () => {
     expect(payload.replyTextTruncated).toBe(true);
     const entry = JSON.parse(
       readFileSync(join(workspaceRoot, 'traces', 'logs', 'trace-20250706.log'), 'utf8'),
-    ) as { replyText: string };
-    expect(entry.replyText).toHaveLength(20_000);
+    ) as { output_text: string };
+    expect(entry.output_text).toHaveLength(20_000);
   });
 });
 

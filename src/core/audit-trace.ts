@@ -18,9 +18,11 @@ export interface AuditMessage {
   chatType: string;
   mentionedBot: boolean;
   createTime?: number;
+  content?: string;
 }
 
 export type AuditFields = Record<string, unknown>;
+export type AuditContext = AuditFields;
 
 function workspaceRoot(io: TraceIo): string {
   return io.workspaceRoot ?? join(paths.appDir, 'my_workspace');
@@ -31,7 +33,10 @@ function currentTime(io: TraceIo): Date {
 }
 
 function dateKey(date: Date): string {
-  return date.toISOString().slice(0, 10).replaceAll('-', '');
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
 }
 
 function safeName(value: string): string {
@@ -53,8 +58,8 @@ export function buildAuditContext(
   text: unknown,
   extras: AuditFields = {},
   limit = DEFAULT_TEXT_LIMIT,
-): AuditFields {
-  const messageText = truncateAuditText(text, limit);
+): AuditContext {
+  const messageText = truncateAuditText(text ?? msg.content ?? '', limit);
   return {
     msgId: msg.messageId,
     chatId: msg.chatId,
@@ -116,7 +121,7 @@ export function traceArtifactPath(
     );
     const file = join(dir, safeName(name));
     const body =
-      kind === 'json' ? JSON.stringify(content, null, 2) : String(content ?? '');
+      kind === 'json' ? JSON.stringify(content ?? null, null, 2) : String(content ?? '');
     mkdirSync(dir, { recursive: true });
     writeFileSync(file, body, 'utf8');
     return relative(root, file);
@@ -126,17 +131,20 @@ export function traceArtifactPath(
 }
 
 export function emitMessageCompletedAudit(
-  audit: AuditFields,
+  audit: AuditContext | undefined,
   fields: AuditFields = {},
   io: TraceIo = {},
 ): void {
-  const reply = truncateAuditText(fields.replyText);
-  const payload: AuditFields = {
-    ...audit,
+  const merged: AuditFields = {
+    ...(audit ?? {}),
+    ...currentLogContext(),
     ...fields,
+  };
+  const reply = truncateAuditText(merged.replyText);
+  const payload: AuditFields = {
+    ...merged,
     replyText: reply.text,
     replyTextTruncated: reply.truncated,
-    ...currentLogContext(),
   };
 
   log.info('audit', 'message_completed', payload as LogFields);
@@ -144,20 +152,24 @@ export function emitMessageCompletedAudit(
   try {
     emitTraceStep(
       {
-        event: 'codex.response_composed',
-        msgId: payload.msgId,
-        chatId: payload.chatId,
-        threadId: payload.threadId ?? null,
+        msg_id: payload.msgId,
+        trace_id: payload.traceId,
+        chat_id: payload.chatId,
+        thread_id: payload.threadId ?? null,
         project: payload.project,
-        traceId: payload.traceId,
-        receivedAt: payload.receivedAt,
-        elapsedMs: payload.elapsedMs,
+        step_name: 'codex.response_composed',
+        step_type: 'compose',
+        started_at: payload.startedAt ?? payload.receivedAt,
+        completed_at: payload.completedAt ?? currentTime(io).toISOString(),
+        elapsed_ms: payload.elapsedMs,
         model: payload.model,
-        replyText: payload.replyText,
-        terminal: payload.terminal,
-        textChars: payload.textChars,
-        images: payload.images,
-        imageFiles: payload.imageFiles,
+        output_text: payload.replyText,
+        response_json: {
+          terminal: payload.terminal,
+          textChars: payload.textChars,
+          images: payload.images,
+          imageFiles: payload.imageFiles,
+        },
       },
       io,
     );
