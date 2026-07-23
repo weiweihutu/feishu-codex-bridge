@@ -25,6 +25,7 @@ import {
   weaveFileManifest,
 } from '../src/bot/media';
 import { paths } from '../src/config/paths';
+import { log } from '../src/core/logger';
 
 function msg(overrides: Partial<NormalizedMessage> = {}): NormalizedMessage {
   return {
@@ -140,6 +141,35 @@ describe('collectInboundImages persistence', () => {
     expect(images.imageFiles).toBeUndefined();
   });
 
+  it('keeps metadata without size when stat fails after a successful copy', async () => {
+    const root = await tempRoot();
+    const statFile = vi.fn(async () => {
+      throw new Error('stat unavailable');
+    });
+    const warn = vi.spyOn(log, 'warn');
+
+    const images = await collectInboundImages(
+      imageChannel([{ body: 'copied', contentType: 'image/png' }]),
+      msg({ resources: [{ type: 'image', fileKey: 'img_stat_failure' }] }),
+      { workspaceRoot: root, now: () => new Date(2026, 6, 23), statFile },
+    );
+
+    expect(statFile).toHaveBeenCalledOnce();
+    expect(images.imageFiles).toEqual([
+      {
+        index: 1,
+        imageKey: 'img_stat_failure',
+        messageId: 'om_x',
+        fileName: 'image_1.png',
+        mimeType: 'image/png',
+        relativePath: 'attachments/feishu_images/20260723/om_x/image_1.png',
+      },
+    ]);
+    expect(warn).not.toHaveBeenCalledWith('intake', 'image-persist-failed', expect.anything());
+    expect(await readFile(join(root, images.imageFiles![0]!.relativePath), 'utf8')).toBe('copied');
+    warn.mockRestore();
+  });
+
   it('keeps all temporary paths when only some durable copies succeed', async () => {
     const root = await tempRoot();
     const durableDir = join(root, 'attachments', 'feishu_images', '20260723', 'om_x');
@@ -190,6 +220,7 @@ describe('collectInboundImages persistence', () => {
       mimeType: 'image/png',
       relativePath: 'attachments/feishu_images/20260102/img/image_1.png',
     });
+    expect(images.imageFiles?.[0]?.relativePath).not.toContain('\\');
     expect(await readFile(join(root, images.imageFiles![0]!.relativePath), 'utf8')).toBe('fallback');
   });
 });

@@ -1,5 +1,5 @@
 import { copyFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { join, posix } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
@@ -55,6 +55,7 @@ export type InboundImages = string[] & { imageFiles?: PersistedImageFile[] };
 export interface InboundImageOptions {
   workspaceRoot?: string;
   now?: () => Date;
+  statFile?: (path: string) => Promise<{ size: number }>;
 }
 
 const EXT_BY_CONTENT_TYPE: Record<string, string> = {
@@ -108,6 +109,7 @@ export async function collectInboundImages(
   const imageFiles: PersistedImageFile[] = [];
   const workspaceRoot = options.workspaceRoot ?? join(paths.appDir, 'my_workspace');
   const day = dateKey((options.now ?? (() => new Date()))());
+  const statFile = options.statFile ?? stat;
   let index = 0;
   for (const ref of refs.slice(0, MAX_IMAGES)) {
     const imageIndex = index++;
@@ -118,20 +120,26 @@ export async function collectInboundImages(
     try {
       const messageDir = safeName(msg.messageId);
       const fileName = `image_${imageIndex + 1}.${downloaded.ext}`;
-      const persistentDir = join(workspaceRoot, 'attachments', 'feishu_images', day, messageDir);
+      const pathSegments = ['attachments', 'feishu_images', day, messageDir, fileName] as const;
+      const persistentDir = join(workspaceRoot, ...pathSegments.slice(0, -1));
       const persistentFile = join(persistentDir, fileName);
       await mkdir(persistentDir, { recursive: true });
       await copyFile(downloaded.path, persistentFile);
-      const size = (await stat(persistentFile)).size;
-      imageFiles.push({
+
+      const metadata: PersistedImageFile = {
         index: imageIndex + 1,
         imageKey: ref.fileKey,
         messageId: ref.messageId,
         fileName,
         mimeType: downloaded.contentType,
-        size,
-        relativePath: relative(workspaceRoot, persistentFile),
-      });
+        relativePath: posix.join(...pathSegments),
+      };
+      try {
+        metadata.size = (await statFile(persistentFile)).size;
+      } catch {
+        /* A copied image remains auditable even when its size cannot be read. */
+      }
+      imageFiles.push(metadata);
     } catch (err) {
       log.warn('intake', 'image-persist-failed', { fileKey: ref.fileKey.slice(0, 24), err: String(err) });
     }
