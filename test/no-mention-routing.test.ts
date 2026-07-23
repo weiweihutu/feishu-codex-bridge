@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AgentEvent, AgentThread } from '../src/agent/types';
 import type { AppConfig } from '../src/config/schema';
 import type { Project } from '../src/project/registry';
 
@@ -8,6 +9,9 @@ const routing = vi.hoisted(() => ({
   listModels: vi.fn(),
   messageCompleted: vi.fn(),
   send: vi.fn(),
+  createdCards: [] as string[],
+  updatedCards: [] as string[],
+  elementContents: [] as string[],
 }));
 
 vi.mock('../src/core/logger', () => ({
@@ -66,7 +70,7 @@ import { createOrchestrator, type Orchestrator } from '../src/bot/handle-message
 
 const cfg: AppConfig = {
   accounts: { app: { id: 'app', secret: 'secret', tenant: 'feishu' } },
-  preferences: { access: { ownerOpenId: 'ou_owner' } },
+  preferences: { access: { ownerOpenId: 'ou_owner' }, showToolCalls: true },
 };
 
 function project(noMention: boolean): Project {
@@ -102,8 +106,33 @@ function channel() {
   return {
     send: routing.send,
     rawClient: {
+      cardkit: {
+        v1: {
+          card: {
+            create: vi.fn(async ({ data }: { data: { data: string } }) => {
+              routing.createdCards.push(data.data);
+              return { data: { card_id: 'card_run' } };
+            }),
+            update: vi.fn(async ({ data }: { data: { card: { data: string } } }) => {
+              routing.updatedCards.push(data.card.data);
+              return {};
+            }),
+          },
+          cardElement: {
+            content: vi.fn(async ({ data }: { data: { content: string } }) => {
+              routing.elementContents.push(data.content);
+              return {};
+            }),
+          },
+        },
+      },
       im: {
         v1: {
+          message: {
+            create: vi.fn(async () => ({ data: { message_id: 'om_run' } })),
+            reply: vi.fn(async () => ({ data: { message_id: 'om_run' } })),
+            get: vi.fn(async () => ({ data: { items: [{ thread_id: 'omt_run' }] } })),
+          },
           messageReaction: {
             create: vi.fn(async () => ({ data: { reaction_id: 'reaction_1' } })),
             delete: vi.fn(async () => ({})),
@@ -112,6 +141,29 @@ function channel() {
       },
     },
   } as never;
+}
+
+function ordinaryThread(events: AgentEvent[]): AgentThread {
+  return {
+    sessionId: 'session_run',
+    runStreamed: () => ({
+      events: (async function* () {
+        for (const event of events) {
+          yield event;
+          await new Promise((resolve) => setTimeout(resolve, 170));
+        }
+      })(),
+      turnId: () => 'turn-1',
+      lastActivity: () => Date.now(),
+    }),
+    runGoal: vi.fn(),
+    clearGoal: vi.fn(async () => undefined),
+    steer: vi.fn(async () => undefined),
+    abort: vi.fn(async () => undefined),
+    compact: vi.fn(async () => ({ compacted: false, usage: null })),
+    isAlive: () => true,
+    close: vi.fn(async () => undefined),
+  };
 }
 
 describe('createOrchestrator no-mention routing', () => {
@@ -130,6 +182,9 @@ describe('createOrchestrator no-mention routing', () => {
     }]);
     routing.messageCompleted.mockReset();
     routing.send.mockReset().mockResolvedValue({ messageId: 'om_error' });
+    routing.createdCards.length = 0;
+    routing.updatedCards.length = 0;
+    routing.elementContents.length = 0;
   });
 
   afterEach(async () => {
@@ -148,6 +203,31 @@ describe('createOrchestrator no-mention routing', () => {
 
     await vi.waitFor(() => expect(routing.startThread).toHaveBeenCalledTimes(1));
     expect(routing.startThread).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/repo' }));
+  });
+
+  it('hides tools throughout an ordinary running and terminal card even when configured visible', async () => {
+    routing.project = project(true);
+    routing.startThread.mockResolvedValue(ordinaryThread([
+      { type: 'tool_use', itemId: 't1', title: 'secret tool' },
+      { type: 'tool_result', itemId: 't1', output: 'secret output' },
+      { type: 'text', itemId: 'm1', text: 'final answer' },
+      { type: 'done', turnId: 'turn-1' },
+    ]));
+
+    await create().onMessage(message({ messageId: 'om_tool_visibility' }));
+    await vi.waitFor(
+      () => expect(routing.updatedCards.at(-1)).toContain('final answer'),
+      { timeout: 5_000 },
+    );
+
+    const cardFrames = [...routing.createdCards, ...routing.updatedCards];
+    expect(cardFrames.length).toBeGreaterThan(1);
+    for (const json of cardFrames) {
+      expect(json).not.toContain('secret tool');
+      expect(json).not.toContain('secret output');
+      expect(json).not.toMatch(/1 个工具(?:调用)?/);
+    }
+    expect(routing.updatedCards.at(-1)).toContain('final answer');
   });
 
   it('audits a direct-topic intake failure once with the model known before startThread fails', async () => {

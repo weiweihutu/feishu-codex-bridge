@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { mapNotification } from '../src/agent/codex-appserver/event-map';
 import type { ServerNotification, ThreadItem } from '../src/agent/codex-appserver/protocol';
 import type { AgentEvent } from '../src/agent/types';
-import { createOrdinaryRunRender } from '../src/bot/handle-message';
 import { buildRunCard, RC } from '../src/card/run-card';
 import {
   initialState,
@@ -262,13 +261,6 @@ describe('buildRunCard', () => {
     expect(json).not.toMatch(/1 个工具(?:调用)?/);
   });
 
-  it('initializes ordinary launch render and card state with tools disabled', () => {
-    const { render, cardState } = createOrdinaryRunRender();
-
-    expect(render.showTools).toBe(false);
-    expect(cardState.showTools).toBe(false);
-    expect(cardState.rs).toEqual(render.snapshot());
-  });
 });
 
 /** Collect every button's {label, action, msgId} from a built card. */
