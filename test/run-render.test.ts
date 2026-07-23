@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { mapNotification } from '../src/agent/codex-appserver/event-map';
+import type { ServerNotification, ThreadItem } from '../src/agent/codex-appserver/protocol';
 import type { AgentEvent } from '../src/agent/types';
 import { buildRunCard, RC } from '../src/card/run-card';
 import {
@@ -15,6 +17,15 @@ function run(events: AgentEvent[]): RunState {
   let s = initialState;
   for (const ev of events) s = reduce(s, ev);
   return s;
+}
+
+function dynamicCompleted(item: ThreadItem): AgentEvent {
+  const event = mapNotification({
+    method: 'item/completed',
+    params: { item, threadId: 'thread-1', turnId: 'turn-1', completedAtMs: 2 },
+  } as ServerNotification);
+  if (!event) throw new Error('Expected dynamic tool event');
+  return event;
 }
 
 /** Top-level body elements of a built run card. */
@@ -108,6 +119,54 @@ describe('reduce', () => {
       traceStatus: 'failed',
       error: { message: 'boom' },
       output: 'not found',
+    });
+  });
+
+  it('marks a protocol-shaped unsuccessful dynamic tool completion as error', () => {
+    const s = run([
+      { type: 'tool_use', itemId: 'dyn-fail', title: 'lookup', toolType: 'dynamic', tool: 'lookup' },
+      dynamicCompleted({
+        type: 'dynamicToolCall',
+        id: 'dyn-fail',
+        namespace: null,
+        tool: 'lookup',
+        arguments: { key: 'x' },
+        status: 'completed',
+        contentItems: [{ type: 'inputText', text: 'partial' }],
+        success: false,
+        durationMs: 12,
+      }),
+    ]);
+
+    expect(tools(s)[0]!.tool).toMatchObject({
+      status: 'error',
+      traceStatus: 'failed',
+      error: { message: 'Dynamic tool call failed' },
+      output: '[{"type":"inputText","text":"partial"}]',
+    });
+  });
+
+  it('keeps a successful dynamic tool completion done', () => {
+    const s = run([
+      { type: 'tool_use', itemId: 'dyn-ok', title: 'lookup', toolType: 'dynamic', tool: 'lookup' },
+      dynamicCompleted({
+        type: 'dynamicToolCall',
+        id: 'dyn-ok',
+        namespace: null,
+        tool: 'lookup',
+        arguments: { key: 'y' },
+        status: 'completed',
+        contentItems: [{ type: 'inputText', text: 'found' }],
+        success: true,
+        durationMs: 8,
+      }),
+    ]);
+
+    expect(tools(s)[0]!.tool).toMatchObject({
+      status: 'done',
+      traceStatus: 'completed',
+      error: undefined,
+      output: '[{"type":"inputText","text":"found"}]',
     });
   });
 

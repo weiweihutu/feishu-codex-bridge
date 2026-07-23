@@ -173,8 +173,8 @@ function mapItemComplete(item: ThreadItem): AgentEvent | null {
         output: toolOutput(raw.result ?? raw.output ?? raw.response ?? raw.contentItems),
         toolType: 'dynamic',
         tool: item.tool,
-        status: raw.status as string | undefined,
-        error: raw.error,
+        status: item.success === false ? 'failed' : (raw.status as string | undefined),
+        error: item.success === false ? raw.error ?? { message: 'Dynamic tool call failed' } : raw.error,
       };
     default:
       return null;

@@ -326,21 +326,46 @@ describe('mapNotification', () => {
         itemCompleted({
           type: 'dynamicToolCall',
           id: 'dyn-1',
+          namespace: null,
           tool: 'lookup',
           arguments: { key: 'x' },
-          status: 'failed',
-          error: { message: 'boom' },
-          output: 'partial',
-        } as unknown as ThreadItem),
+          status: 'completed',
+          contentItems: [{ type: 'inputText', text: 'partial' }],
+          success: false,
+          durationMs: 12,
+        } as ThreadItem),
       ),
     ).toMatchObject({
       type: 'tool_result',
       itemId: 'dyn-1',
-      output: 'partial',
+      output: '[{"type":"inputText","text":"partial"}]',
       toolType: 'dynamic',
       tool: 'lookup',
       status: 'failed',
-      error: { message: 'boom' },
+      error: { message: 'Dynamic tool call failed' },
+    });
+    expect(
+      mapNotification(
+        itemCompleted({
+          type: 'dynamicToolCall',
+          id: 'dyn-2',
+          namespace: null,
+          tool: 'lookup',
+          arguments: { key: 'y' },
+          status: 'completed',
+          contentItems: [{ type: 'inputText', text: 'found' }],
+          success: true,
+          durationMs: 8,
+        } as ThreadItem),
+      ),
+    ).toMatchObject({
+      type: 'tool_result',
+      itemId: 'dyn-2',
+      output: '[{"type":"inputText","text":"found"}]',
+      toolType: 'dynamic',
+      tool: 'lookup',
+      status: 'completed',
+      error: undefined,
     });
     expect(
       mapNotification(
