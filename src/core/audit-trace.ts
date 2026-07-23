@@ -1,7 +1,13 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { paths } from '../config/paths';
-import { currentLogContext, log, withTrace, type LogFields } from './logger';
+import {
+  currentLogContext,
+  log,
+  withTrace,
+  type LogContext,
+  type LogFields,
+} from './logger';
 
 const DEFAULT_TEXT_LIMIT = 20_000;
 
@@ -40,6 +46,24 @@ const AUDIT_CORE_KEYS = new Set([
   'messageTextTruncated',
   'receivedAt',
 ]);
+
+function nonEmptyString(...values: unknown[]): string | undefined {
+  return values.find(
+    (value): value is string => typeof value === 'string' && value.length > 0,
+  );
+}
+
+function normalizeCorrelationIds(
+  audit: AuditContext | undefined,
+  context: Readonly<LogFields>,
+  fields: AuditFields,
+): Pick<LogContext, 'traceId' | 'chatId' | 'msgId'> {
+  return {
+    traceId: nonEmptyString(fields.traceId, context.traceId, audit?.traceId),
+    chatId: nonEmptyString(fields.chatId, context.chatId, audit?.chatId),
+    msgId: nonEmptyString(fields.msgId, context.msgId, audit?.msgId),
+  };
+}
 
 function workspaceRoot(io: TraceIo): string {
   return io.workspaceRoot ?? join(paths.appDir, 'my_workspace');
@@ -156,10 +180,13 @@ export function emitMessageCompletedAudit(
   fields: AuditFields = {},
   io: TraceIo = {},
 ): void {
+  const context = currentLogContext();
+  const correlationIds = normalizeCorrelationIds(audit, context, fields);
   const merged: AuditFields = {
     ...(audit ?? {}),
-    ...currentLogContext(),
+    ...context,
     ...fields,
+    ...correlationIds,
   };
   const reply = truncateAuditText(merged.replyText);
   const payload: AuditFields = {
@@ -168,15 +195,8 @@ export function emitMessageCompletedAudit(
     replyTextTruncated: reply.truncated,
   };
 
-  const finalContext = {
-    traceId: typeof payload.traceId === 'string' ? payload.traceId : undefined,
-    chatId: typeof payload.chatId === 'string' ? payload.chatId : undefined,
-    msgId: typeof payload.msgId === 'string' ? payload.msgId : undefined,
-  };
-  withTrace(finalContext, () => {
-    if (payload.traceId === undefined) {
-      payload.traceId = currentLogContext().traceId;
-    }
+  withTrace(correlationIds, () => {
+    payload.traceId = currentLogContext().traceId;
     log.info('audit', 'message_completed', payload as LogFields);
   });
 

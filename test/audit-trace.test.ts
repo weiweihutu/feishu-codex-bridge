@@ -348,6 +348,95 @@ describe('traceArtifactPath', () => {
 });
 
 describe('emitMessageCompletedAudit', () => {
+  it('ignores invalid field correlation IDs in favor of valid current context IDs', async () => {
+    const workspaceRoot = tempRoot();
+    const marker = `audit-invalid-fields-${Date.now()}-${Math.random()}`;
+
+    withTrace(
+      { traceId: 'context-trace', chatId: 'context-chat', msgId: 'context-msg' },
+      () => {
+        emitMessageCompletedAudit(
+          {
+            msgId: 'audit-msg',
+            chatId: 'audit-chat',
+            threadId: 'audit-thread',
+            senderId: 'audit-sender',
+          },
+          {
+            traceId: null,
+            chatId: 42,
+            msgId: '',
+            replyText: 'answer',
+            testMarker: marker,
+          },
+          { workspaceRoot, now: () => fixedNow },
+        );
+      },
+    );
+
+    const logEntry = await readRealLogEntry(marker);
+    const traceEntry = JSON.parse(
+      readFileSync(
+        join(workspaceRoot, 'traces', 'logs', 'trace-20250706.log'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+
+    expect(logEntry).toEqual(
+      expect.objectContaining({
+        traceId: 'context-trace',
+        chatId: 'context-chat',
+        msgId: 'context-msg',
+        _traceId: 'context-trace',
+        _chatId: 'context-chat',
+        _msgId: 'context-msg',
+      }),
+    );
+    expect(traceEntry).toEqual(
+      expect.objectContaining({
+        trace_id: 'context-trace',
+        chat_id: 'context-chat',
+        msg_id: 'context-msg',
+      }),
+    );
+  });
+
+  it('generates one trace ID and omits invalid chat and message IDs without context', async () => {
+    const workspaceRoot = tempRoot();
+    const marker = `audit-generated-trace-${Date.now()}-${Math.random()}`;
+
+    emitMessageCompletedAudit(
+      undefined,
+      {
+        traceId: 123,
+        chatId: null,
+        msgId: '',
+        replyText: 'answer',
+        testMarker: marker,
+      },
+      { workspaceRoot, now: () => fixedNow },
+    );
+
+    const logEntry = await readRealLogEntry(marker);
+    const traceEntry = JSON.parse(
+      readFileSync(
+        join(workspaceRoot, 'traces', 'logs', 'trace-20250706.log'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+
+    expect(logEntry.traceId).toEqual(expect.any(String));
+    expect(logEntry.traceId).not.toBe('');
+    expect(logEntry._traceId).toBe(logEntry.traceId);
+    expect(traceEntry.trace_id).toBe(logEntry.traceId);
+    expect(logEntry).not.toHaveProperty('chatId');
+    expect(logEntry).not.toHaveProperty('_chatId');
+    expect(logEntry).not.toHaveProperty('msgId');
+    expect(logEntry).not.toHaveProperty('_msgId');
+    expect(traceEntry).not.toHaveProperty('chat_id');
+    expect(traceEntry).not.toHaveProperty('msg_id');
+  });
+
   it('writes final correlation IDs at the top level of the real logger entry', async () => {
     expect(process.env.VITEST).toBeTruthy();
     const noContextRoot = tempRoot();
