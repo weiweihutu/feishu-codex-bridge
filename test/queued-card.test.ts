@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { buildQueuedCard, RC } from '../src/card/run-card';
-import { activateQueuedTurn, pickIdleSessions, type QueuedTurn } from '../src/bot/handle-message';
+import { initialState, reduce } from '../src/card/run-state';
+import {
+  activateQueuedTurn,
+  emitOrdinaryTurnCompletion,
+  pickIdleSessions,
+  type QueuedTurn,
+} from '../src/bot/handle-message';
+import type { AuditContext } from '../src/core/audit-trace';
 
 function buttons(node: unknown, acc: Record<string, any>[] = []): Record<string, any>[] {
   if (Array.isArray(node)) node.forEach((n) => buttons(n, acc));
@@ -112,5 +119,116 @@ describe('queued follow-up requester isolation', () => {
     // Timing/title stay attached to the same turn object used by notification.
     expect(queued.requestedAt).toBe(123_000);
     expect(queued.summary).toBe('second turn');
+  });
+});
+
+describe('ordinary turn completion audit orchestration', () => {
+  const audit = (msgId: string): AuditContext => ({
+    msgId,
+    chatId: 'oc_1',
+    threadId: 'omt_1',
+    senderId: `ou_${msgId}`,
+    traceId: `trace_${msgId}`,
+    startedAt: '2026-07-23T00:00:00.000Z',
+    imageFiles: [`${msgId}.png`],
+  });
+
+  it('keeps first and queued turn completion ownership separate', () => {
+    const emitted: Array<{ msgId: string; fields: Record<string, unknown> }> = [];
+    const emit = (ctx: AuditContext | undefined, fields: Record<string, unknown> = {}) => {
+      emitted.push({ msgId: ctx!.msgId, fields });
+    };
+    const first = { audit: audit('om_first'), completionEmitted: false };
+    const queued = { audit: audit('om_queued'), completionEmitted: false };
+    const done = reduce(structuredClone(initialState), { type: 'done', turnId: 'turn-first' });
+
+    emitOrdinaryTurnCompletion(first, {
+      kind: 'success',
+      runState: done,
+      images: 1,
+      model: 'gpt-first',
+    }, emit);
+    emitOrdinaryTurnCompletion(first, {
+      kind: 'success',
+      runState: done,
+      images: 1,
+      model: 'gpt-first',
+    }, emit);
+    emitOrdinaryTurnCompletion(queued, {
+      kind: 'success',
+      runState: done,
+      images: 2,
+      model: 'gpt-queued',
+    }, emit);
+
+    expect(emitted.map((entry) => entry.msgId)).toEqual(['om_first', 'om_queued']);
+    expect(emitted.map((entry) => entry.fields)).toEqual([
+      expect.objectContaining({ msgId: 'om_first', traceId: 'trace_om_first' }),
+      expect.objectContaining({ msgId: 'om_queued', traceId: 'trace_om_queued' }),
+    ]);
+  });
+
+  it('emits one error completion with the turn images, files, and model', () => {
+    const emitted: Array<{ ctx: AuditContext | undefined; fields: Record<string, unknown> }> = [];
+    const turn = { audit: audit('om_error'), completionEmitted: false };
+
+    emitOrdinaryTurnCompletion(turn, {
+      kind: 'error',
+      error: new Error('boom'),
+      images: 3,
+      model: 'gpt-error',
+    }, (ctx, fields = {}) => emitted.push({ ctx, fields }));
+    emitOrdinaryTurnCompletion(turn, {
+      kind: 'error',
+      error: new Error('again'),
+      images: 3,
+      model: 'gpt-error',
+    }, (ctx, fields = {}) => emitted.push({ ctx, fields }));
+
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.ctx?.msgId).toBe('om_error');
+    expect(emitted[0]?.fields).toMatchObject({
+      terminal: 'error',
+      error: 'boom',
+      replyText: '',
+      textChars: 0,
+      images: 3,
+      imageFiles: ['om_error.png'],
+      model: 'gpt-error',
+    });
+  });
+
+  it('uses only the final message text for a successful reply audit', () => {
+    let state = structuredClone(initialState);
+    state = reduce(state, { type: 'text_delta', itemId: 'progress', delta: 'progress that must not leak' });
+    state = reduce(state, { type: 'text', itemId: 'progress', text: 'progress that must not leak' });
+    state = reduce(state, { type: 'text_delta', itemId: 'final', delta: 'final answer' });
+    state = reduce(state, { type: 'text', itemId: 'final', text: 'final answer' });
+    state = reduce(state, { type: 'done', turnId: 'turn-reply' });
+    const emitted: Record<string, unknown>[] = [];
+
+    emitOrdinaryTurnCompletion(
+      { audit: audit('om_reply'), completionEmitted: false },
+      { kind: 'success', runState: state, images: 0, model: 'gpt-reply' },
+      (_ctx, fields = {}) => emitted.push(fields),
+    );
+
+    expect(emitted[0]).toMatchObject({ replyText: 'final answer', textChars: 12 });
+    expect(String(emitted[0]?.replyText)).not.toContain('progress');
+  });
+
+  it('does nothing when the launch has no audit context', () => {
+    const emitted: Record<string, unknown>[] = [];
+    emitOrdinaryTurnCompletion(
+      { audit: undefined, completionEmitted: false },
+      {
+        kind: 'error',
+        error: new Error('goal/comment launch'),
+        images: 0,
+        model: 'gpt-unused',
+      },
+      (_ctx, fields = {}) => emitted.push(fields),
+    );
+    expect(emitted).toEqual([]);
   });
 });

@@ -397,6 +397,10 @@ export interface QueuedTurn {
   requestedAt: number;
   /** Clean user-authored label; never derive reminder copy from woven input. */
   summary?: string;
+  /** Ordinary-message audit identity travels with the turn through the queue. */
+  audit?: AuditContext;
+  /** Completion dedupe is per executed turn, never shared by the whole run. */
+  completionEmitted?: boolean;
 }
 
 /** Switch the mutable session control state to a queued follow-up. Exported as
@@ -434,6 +438,51 @@ export function settleOrdinaryTurnRender(
   } else {
     // finalize() is a no-op for explicit done/error terminals.
     render.finalize();
+  }
+}
+
+type OrdinaryTurnCompletion =
+  | { kind: 'success'; runState: RunState; images: number; model?: string }
+  | { kind: 'error'; error: unknown; images: number; model?: string };
+
+export function emitOrdinaryTurnCompletion(
+  turn: Pick<QueuedTurn, 'audit' | 'completionEmitted'>,
+  completion: OrdinaryTurnCompletion,
+  emit: typeof emitMessageCompletedAudit = emitMessageCompletedAudit,
+): void {
+  if (!turn.audit || turn.completionEmitted) return;
+  turn.completionEmitted = true;
+  const completedAt = Date.now();
+  const common = {
+    msgId: turn.audit.msgId,
+    chatId: turn.audit.chatId,
+    traceId: turn.audit.traceId,
+    completedAt: new Date(completedAt).toISOString(),
+    elapsedMs: completedAt - Date.parse(String(turn.audit.startedAt ?? completedAt)),
+    images: completion.images,
+    imageFiles: turn.audit.imageFiles ?? [],
+    model: completion.model,
+  };
+  try {
+    if (completion.kind === 'success') {
+      const replyText = finalMessageText(completion.runState);
+      emit(turn.audit, {
+        ...common,
+        terminal: completion.runState.terminal,
+        replyText,
+        textChars: replyText.length,
+      });
+    } else {
+      emit(turn.audit, {
+        ...common,
+        terminal: 'error',
+        error: completion.error instanceof Error ? completion.error.message : String(completion.error),
+        replyText: '',
+        textChars: 0,
+      });
+    }
+  } catch {
+    /* audit is best-effort */
   }
 }
 
@@ -1219,6 +1268,13 @@ export function createOrchestrator(
         requesterOpenId: msg.senderId,
         requestedAt: msg.createTime || Date.now(),
         summary: stripFileTokens(text).slice(0, 80) || undefined,
+        audit: buildAuditContext(msg, text, {
+          project: project?.name ?? '(unregistered)',
+          traceId: currentLogContext().traceId,
+          images: images?.length ?? 0,
+          imageFiles: images?.imageFiles ?? [],
+          startedAt: new Date(msg.createTime || Date.now()).toISOString(),
+        }),
       });
       log.info('intake', 'queued', { depth: cur.queue.length });
       return;
@@ -1285,6 +1341,13 @@ export function createOrchestrator(
         requesterOpenId: msg.senderId,
         requestedAt: msg.createTime || Date.now(),
         summary: stripFileTokens(summaryText ?? text).slice(0, 80) || undefined,
+        audit: buildAuditContext(msg, summaryText ?? text, {
+          project: project?.name ?? '(unregistered)',
+          traceId: currentLogContext().traceId,
+          images: preloadedImages?.length ?? 0,
+          imageFiles: preloadedImages?.imageFiles ?? [],
+          startedAt: new Date(msg.createTime || Date.now()).toISOString(),
+        }),
       });
       log.info('intake', 'queued', { depth: existing.queue.length });
       return;
@@ -1295,8 +1358,19 @@ export function createOrchestrator(
       // Goal runs use the OKR reaction (added at dispatch) as their only receipt,
       // not the ⏳/🫳 run-reaction lifecycle.
       const reaction = goal ? undefined : runReaction(msg.messageId, !sema.hasFree());
+      const tIntake = Date.now();
+      const intakeAudit = goal
+        ? undefined
+        : buildAuditContext(msg, summaryText ?? text, {
+            project: project?.name ?? '(unregistered)',
+            traceId: currentLogContext().traceId,
+            images: preloadedImages?.length ?? 0,
+            imageFiles: preloadedImages?.imageFiles ?? [],
+            startedAt: new Date(tIntake).toISOString(),
+          });
+      let intakeImages = preloadedImages;
+      let intakeModel: string | undefined;
       try {
-        const tIntake = Date.now();
         // ── 入站三路并行（M-1）── 飞书 API（图片下载 / 文件+引用织入）、本地
         // spawn（resolveThread）与话题上文拉取互不依赖，Promise.all 把串行 RTT
         // 全部重叠掉。失败语义与串行版一致：resolve/ingest/getSession 失败走外层
@@ -1305,11 +1379,16 @@ export function createOrchestrator(
         // 返回空），永不拖死其他路。
         // Images preloaded by handleTurn's fall-through, else fetch them now
         // (inside the detached run, after the synchronous reservation).
-        const imagesP = preloadedImages
-          ? Promise.resolve(preloadedImages)
-          : messageHasImages(msg)
-            ? collectInboundImages(channel, msg)
-            : Promise.resolve(undefined);
+        const imagesP = (
+          preloadedImages
+            ? Promise.resolve(preloadedImages)
+            : messageHasImages(msg)
+              ? collectInboundImages(channel, msg)
+              : Promise.resolve(undefined)
+        ).then((value) => {
+          intakeImages = value;
+          return value;
+        });
         // File attachments / quoted message woven into the prompt. Skipped when
         // preIngested (handleTurn already wove them into `text`).
         const ingestP = preIngested ? Promise.resolve(text) : ingestContext(msg, text);
@@ -1346,6 +1425,24 @@ export function createOrchestrator(
           priorP,
           historyP,
         ]);
+        const be = backendFor(project?.backend);
+        let launchModel = prior?.model;
+        let launchEffort = prior?.effort;
+        if (!launchModel || !launchEffort) {
+          const defaults = pickDefault(await listModels(be), {
+            model: launchModel ?? project?.defaultModel,
+            effort: launchEffort ?? project?.defaultEffort,
+          });
+          launchModel ??= defaults.model;
+          launchEffort ??= defaults.effort;
+        }
+        intakeModel = launchModel;
+        if (intakeAudit) {
+          intakeAudit.model = launchModel;
+          intakeAudit.effort = launchEffort;
+          intakeAudit.images = images?.length ?? 0;
+          intakeAudit.imageFiles = images?.imageFiles ?? [];
+        }
         let firstText = ingested;
         let thread = resolved;
         const neverSeen = !thread;
@@ -1357,8 +1454,14 @@ export function createOrchestrator(
           // Unknown session (created before this bridge, or store lost): treat as
           // a fresh session bound to the resolved cwd, on the project's backend.
           const cwd = project?.cwd ?? fallbackCwd;
-          const be = backendFor(project?.backend);
-          thread = await be.startThread({ cwd, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
+          thread = await be.startThread({
+            cwd,
+            model: launchModel,
+            effort: launchEffort,
+            mode: perm.mode,
+            network: perm.network,
+            autoCompact: perm.autoCompact,
+          });
           trackSession(sessionKey, thread);
           // 自愈观测：来源=全新会话（无持久化记录），与 resume-ok/resume-recreate
           // 互斥——三者其一 + agent 层的 spawn/prewarm-hit 即可还原完整恢复路径。
@@ -1414,8 +1517,12 @@ export function createOrchestrator(
           });
           firstText = weaveThreadHistory(firstText, history);
         }
+        if (!goal) firstText = appendFeishuContext(firstText, msg);
+        // Advance the high-water mark so the NEXT turn only catches up新消息.
+        // (a brand-new session already wrote it in the upsert above.)
+        if (!neverSeen) void patchSession(sessionKey, { lastSeenAt: msg.createTime }).catch(() => undefined);
+        reserved.thread = thread;
         if (!goal) {
-          firstText = appendFeishuContext(firstText, msg);
           const promptBuiltAt = Date.now();
           emitTraceStep({
             msg_id: msg.messageId,
@@ -1438,10 +1545,6 @@ export function createOrchestrator(
             },
           });
         }
-        // Advance the high-water mark so the NEXT turn only catches up新消息.
-        // (a brand-new session already wrote it in the upsert above.)
-        if (!neverSeen) void patchSession(sessionKey, { lastSeenAt: msg.createTime }).catch(() => undefined);
-        reserved.thread = thread;
         const launchOpts: LaunchOpts = {
           chatId: msg.chatId,
           replyTo: msg.messageId,
@@ -1451,21 +1554,12 @@ export function createOrchestrator(
           firstText,
           images,
           knownThreadId: sessionKey,
+          model: launchModel,
+          effort: launchEffort,
           summary: stripFileTokens(summaryText ?? text).slice(0, 80) || '(本轮任务)',
           requesterOpenId: msg.senderId,
           requestedAt: msg.createTime || tIntake,
-          ...(!goal
-            ? {
-                audit: buildAuditContext(msg, summaryText ?? text, {
-                  project: project?.name ?? '(unregistered)',
-                  model: prior?.model,
-                  effort: prior?.effort,
-                  images: images?.length ?? 0,
-                  imageFiles: images?.imageFiles ?? [],
-                  startedAt: new Date(tIntake).toISOString(),
-                }),
-              }
-            : {}),
+          ...(!goal ? { audit: intakeAudit } : {}),
           // 编织完成 → turn/start 之间不再读盘：首轮直接用预取的会话记录
           // （prior=undefined 即确知是全新会话，刚 upsert 的记录还没有 model）。
           firstRec: prior ?? null,
@@ -1477,6 +1571,15 @@ export function createOrchestrator(
         active.delete(sessionKey); // release the reservation so the session isn't wedged
         reaction?.done();
         log.fail('intake', err);
+        emitOrdinaryTurnCompletion(
+          { audit: intakeAudit, completionEmitted: false },
+          {
+            kind: 'error',
+            error: err,
+            images: intakeImages?.length ?? 0,
+            model: intakeModel,
+          },
+        );
         await channel
           .send(msg.chatId, { markdown: `❌ ${err instanceof Error ? err.message : String(err)}` }, { replyTo: msg.messageId, replyInThread: !flat })
           .catch(() => undefined);
@@ -1678,6 +1781,7 @@ export function createOrchestrator(
           ? {
               audit: buildAuditContext(msg, text, {
                 project: project?.name ?? '(unregistered)',
+                traceId: currentLogContext().traceId,
                 model,
                 effort,
                 images: images?.length ?? 0,
@@ -3740,15 +3844,15 @@ export function createOrchestrator(
     // intake durations ride the FIRST turn's stream.timing line only (M-1)
     let intake = opts.timing;
     let firstRec = opts.firstRec;
-    let currentAudit = opts.audit;
-    let completionEmitted = false;
+    let currentTurn: QueuedTurn = {
+      input: { text: opts.firstText, images: opts.images },
+      requesterOpenId: opts.requesterOpenId,
+      requestedAt: opts.requestedAt ?? Date.now(),
+      summary: opts.summary,
+      audit: opts.audit,
+    };
+    let currentTurnModel = opts.model;
     try {
-      let currentTurn: QueuedTurn = {
-        input: { text: opts.firstText, images: opts.images },
-        requesterOpenId: opts.requesterOpenId,
-        requestedAt: opts.requestedAt ?? Date.now(),
-        summary: opts.summary,
-      };
       let replyTo = opts.replyTo;
       let replyInThread = opts.flat ? false : (opts.replyInThread ?? Boolean(opts.knownThreadId));
       for (;;) {
@@ -3762,6 +3866,7 @@ export function createOrchestrator(
         firstRec = undefined;
         const turnModel = rec?.model ?? opts.model;
         const turnEffort = rec?.effort ?? opts.effort;
+        currentTurnModel = turnModel;
         const modelDisp = getModelDisplay(cfg);
         const run = opts.thread.runStreamed(turnInput, { model: turnModel, effort: turnEffort });
         const turnStartAt = Date.now(); // turn/start 已在 runStreamed() 内发出（与下面的建卡并行）
@@ -3924,14 +4029,14 @@ export function createOrchestrator(
             const started = toolStartedAt.get(ev.itemId) ?? tEv;
             const artifact =
               ev.type === 'tool_result' && ev.output && ev.output.length > 20_000
-                ? traceArtifactPath(currentAudit?.msgId, `${ev.itemId}-output.txt`, ev.output)
+                ? traceArtifactPath(currentTurn.audit?.msgId, `${ev.itemId}-output.txt`, ev.output)
                 : null;
             emitTraceStep({
-              msg_id: currentAudit?.msgId,
-              trace_id: currentLogContext().traceId,
+              msg_id: currentTurn.audit?.msgId,
+              trace_id: (currentTurn.audit?.traceId as string | undefined) ?? currentLogContext().traceId,
               chat_id: opts.chatId,
               thread_id: topicThreadId ?? null,
-              project: currentAudit?.project,
+              project: currentTurn.audit?.project,
               session_id: opts.thread.sessionId,
               started_at: new Date(started).toISOString(),
               completed_at: new Date(tEv).toISOString(),
@@ -4076,22 +4181,12 @@ export function createOrchestrator(
         replyTo = finalMsgId;
         replyInThread = !opts.flat; // stay in the topic for queued turns (single: stay flat)
         log.info('card', 'final', { terminal: render.terminal() });
-        if (currentAudit && !completionEmitted) {
-          const replyText = finalMessageText(rc.rs);
-          const completedAt = Date.now();
-          emitMessageCompletedAudit(currentAudit, {
-            completedAt: new Date(completedAt).toISOString(),
-            elapsedMs: completedAt - Date.parse(String(currentAudit.startedAt ?? completedAt)),
-            terminal: rc.rs.terminal,
-            replyText,
-            textChars: replyText.length,
-            images: rc.images?.size ?? 0,
-            imageFiles: currentAudit.imageFiles ?? [],
-            model: turnModel,
-          });
-          completionEmitted = true;
-          currentAudit = undefined;
-        }
+        emitOrdinaryTurnCompletion(currentTurn, {
+          kind: 'success',
+          runState: rc.rs,
+          images: rc.images?.size ?? 0,
+          model: turnModel,
+        });
 
         // A stop (⏹ graceful or forced / watchdog) or a dead process ends the
         // whole run — drop any queued follow-ups, but tell the user instead of
@@ -4119,20 +4214,12 @@ export function createOrchestrator(
       }
     } catch (err) {
       log.fail('intake', err);
-      if (currentAudit && !completionEmitted) {
-        const completedAt = Date.now();
-        emitMessageCompletedAudit(currentAudit, {
-          completedAt: new Date(completedAt).toISOString(),
-          elapsedMs: completedAt - Date.parse(String(currentAudit.startedAt ?? completedAt)),
-          terminal: 'error',
-          error: err instanceof Error ? err.message : String(err),
-          replyText: '',
-          textChars: 0,
-          images: 0,
-          imageFiles: currentAudit.imageFiles ?? [],
-        });
-        completionEmitted = true;
-      }
+      emitOrdinaryTurnCompletion(currentTurn, {
+        kind: 'error',
+        error: err,
+        images: currentTurn.input.images?.length ?? 0,
+        model: currentTurnModel,
+      });
       await channel
         .send(opts.chatId, { markdown: `❌ ${err instanceof Error ? err.message : String(err)}` }, { replyTo: opts.replyTo, replyInThread: !opts.flat })
         .catch(() => undefined);
