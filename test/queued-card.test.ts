@@ -138,29 +138,45 @@ describe('ordinary turn completion audit orchestration', () => {
     const emit = (ctx: AuditContext | undefined, fields: Record<string, unknown> = {}) => {
       emitted.push({ msgId: ctx!.msgId, fields });
     };
-    const first = { audit: audit('om_first'), completionEmitted: false };
-    const queued = { audit: audit('om_queued'), completionEmitted: false };
+    const queue: QueuedTurn[] = [];
+    let current: QueuedTurn = {
+      input: { text: 'first' },
+      requesterOpenId: 'ou_first',
+      requestedAt: 1,
+      audit: audit('om_first'),
+    };
+    queue.push({
+      input: { text: 'queued' },
+      requesterOpenId: 'ou_queued',
+      requestedAt: 2,
+      audit: audit('om_queued'),
+    });
+    const control = { requesterOpenId: current.requesterOpenId, completionReminderRequested: true };
     const done = reduce(structuredClone(initialState), { type: 'done', turnId: 'turn-first' });
 
-    emitOrdinaryTurnCompletion(first, {
+    emitOrdinaryTurnCompletion(current, {
       kind: 'success',
       runState: done,
       images: 1,
       model: 'gpt-first',
     }, emit);
-    emitOrdinaryTurnCompletion(first, {
+    emitOrdinaryTurnCompletion(current, {
       kind: 'success',
       runState: done,
       images: 1,
       model: 'gpt-first',
     }, emit);
-    emitOrdinaryTurnCompletion(queued, {
+    current = queue.shift()!;
+    activateQueuedTurn(control, current);
+    emitOrdinaryTurnCompletion(current, {
       kind: 'success',
       runState: done,
       images: 2,
       model: 'gpt-queued',
     }, emit);
 
+    expect(queue).toHaveLength(0);
+    expect(control).toEqual({ requesterOpenId: 'ou_queued', completionReminderRequested: false });
     expect(emitted.map((entry) => entry.msgId)).toEqual(['om_first', 'om_queued']);
     expect(emitted.map((entry) => entry.fields)).toEqual([
       expect.objectContaining({ msgId: 'om_first', traceId: 'trace_om_first' }),

@@ -1706,25 +1706,56 @@ export function createOrchestrator(
       // 并回 ❌（原先 ingest 失败只进日志、reaction 卡死——顺带修正），但已起的
       // 进程必须回收：它还不在 sessions 里，不关就是孤儿 app-server。
       const tIntake = Date.now();
+      const intakeAudit = goal
+        ? undefined
+        : buildAuditContext(msg, text, {
+            project: project?.name ?? '(unregistered)',
+            traceId: currentLogContext().traceId,
+            images: 0,
+            imageFiles: [],
+            startedAt: new Date(tIntake).toISOString(),
+          });
       let tResolveDone = tIntake;
+      let thread: AgentThread;
+      let model: string | undefined;
+      let effort: ReasoningEffort | undefined;
+      let images: InboundImages | undefined;
+      let firstText: string;
       const threadP = (async () => {
-        const { model, effort } = pickDefault(await listModels(be), {
+        const picked = pickDefault(await listModels(be), {
           model: project?.defaultModel,
           effort: project?.defaultEffort,
         });
-        const thread = await be.startThread({ cwd, model, effort, mode: perm.mode, network: perm.network, autoCompact: perm.autoCompact });
+        model = picked.model;
+        effort = picked.effort;
+        if (intakeAudit) {
+          intakeAudit.model = model;
+          intakeAudit.effort = effort;
+        }
+        const startedThread = await be.startThread({
+          cwd,
+          model,
+          effort,
+          mode: perm.mode,
+          network: perm.network,
+          autoCompact: perm.autoCompact,
+        });
         tResolveDone = Date.now();
-        return { thread, model, effort };
+        return { thread: startedThread, model, effort };
       })();
       // Download any attached/forwarded images so the opening turn can see them,
       // and any file attachments (their paths get woven into the prompt text).
-      const imagesP = messageHasImages(msg) ? collectInboundImages(channel, msg) : Promise.resolve(undefined);
+      const imagesP = (
+        messageHasImages(msg) ? collectInboundImages(channel, msg) : Promise.resolve(undefined)
+      ).then((value) => {
+        images = value;
+        if (intakeAudit) {
+          intakeAudit.images = value?.length ?? 0;
+          intakeAudit.imageFiles = value?.imageFiles ?? [];
+        }
+        return value;
+      });
       const ingestP = ingestContext(msg, text);
-      let thread: AgentThread;
-      let model: string;
-      let effort: ReasoningEffort;
-      let images: InboundImages | undefined;
-      let firstText: string;
       try {
         const [started, imgs, ingested] = await Promise.all([threadP, imagesP, ingestP]);
         ({ thread, model, effort } = started);
@@ -1736,6 +1767,15 @@ export function createOrchestrator(
         // 失败路互不拖死：threadP 若已成功则回收孤儿进程，若失败吞掉其 rejection。
         void threadP.then((s) => s.thread.close()).catch(() => undefined);
         log.fail('card', err, { phase: 'start-topic' });
+        emitOrdinaryTurnCompletion(
+          { audit: intakeAudit, completionEmitted: false },
+          {
+            kind: 'error',
+            error: err,
+            images: images?.length ?? 0,
+            model,
+          },
+        );
         await channel
           .send(msg.chatId, { markdown: `❌ 启动失败：${err instanceof Error ? err.message : String(err)}` }, { replyTo: msg.messageId })
           .catch(() => undefined);
@@ -1771,25 +1811,13 @@ export function createOrchestrator(
         thread,
         firstText,
         images,
-        model,
-        effort,
+        model: model!,
+        effort: effort!,
         cwd,
         summary: stripFileTokens(text).slice(0, 80) || '(空)',
         requesterOpenId: msg.senderId,
         requestedAt: msg.createTime || tIntake,
-        ...(!goal
-          ? {
-              audit: buildAuditContext(msg, text, {
-                project: project?.name ?? '(unregistered)',
-                traceId: currentLogContext().traceId,
-                model,
-                effort,
-                images: images?.length ?? 0,
-                imageFiles: images?.imageFiles ?? [],
-                startedAt: new Date(tIntake).toISOString(),
-              }),
-            }
-          : {}),
+        ...(!goal ? { audit: intakeAudit } : {}),
         roleSuffix: perm.roleSuffix,
         backendId: be.id,
         timing: { tResolve: tResolveDone - tIntake, tWeave: Date.now() - tIntake },

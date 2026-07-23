@@ -6,6 +6,8 @@ const routing = vi.hoisted(() => ({
   project: undefined as Project | undefined,
   startThread: vi.fn(),
   listModels: vi.fn(),
+  messageCompleted: vi.fn(),
+  send: vi.fn(),
 }));
 
 vi.mock('../src/core/logger', () => ({
@@ -14,6 +16,7 @@ vi.mock('../src/core/logger', () => ({
     warn: () => undefined,
     fail: () => undefined,
   },
+  currentLogContext: () => ({ traceId: 'trace_direct_topic' }),
   withTrace: async (_ctx: unknown, fn: () => Promise<void> | void) => fn(),
 }));
 
@@ -30,6 +33,14 @@ vi.mock('../src/project/announcement', async (importOriginal) => {
   return {
     ...original,
     refreshBranch: vi.fn(async () => undefined),
+  };
+});
+
+vi.mock('../src/core/audit-trace', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/core/audit-trace')>();
+  return {
+    ...original,
+    emitMessageCompletedAudit: routing.messageCompleted,
   };
 });
 
@@ -89,7 +100,7 @@ function message(overrides: Record<string, unknown> = {}) {
 
 function channel() {
   return {
-    send: vi.fn(async () => ({ messageId: 'om_error' })),
+    send: routing.send,
     rawClient: {
       im: {
         v1: {
@@ -117,6 +128,8 @@ describe('createOrchestrator no-mention routing', () => {
       supportedEfforts: ['medium'],
       defaultEffort: 'medium',
     }]);
+    routing.messageCompleted.mockReset();
+    routing.send.mockReset().mockResolvedValue({ messageId: 'om_error' });
   });
 
   afterEach(async () => {
@@ -135,6 +148,34 @@ describe('createOrchestrator no-mention routing', () => {
 
     await vi.waitFor(() => expect(routing.startThread).toHaveBeenCalledTimes(1));
     expect(routing.startThread).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/repo' }));
+  });
+
+  it('audits a direct-topic intake failure once with the model known before startThread fails', async () => {
+    routing.project = project(true);
+    const msg = message({ messageId: 'om_intake_error' });
+
+    await create().onMessage(msg);
+
+    await vi.waitFor(() => expect(routing.messageCompleted).toHaveBeenCalledTimes(1));
+    expect(routing.messageCompleted).toHaveBeenCalledWith(
+      expect.objectContaining({ msgId: 'om_intake_error', model: 'gpt-test' }),
+      expect.objectContaining({
+        terminal: 'error',
+        error: 'stop at direct-topic boundary',
+        images: 0,
+        model: 'gpt-test',
+        replyText: '',
+      }),
+    );
+  });
+
+  it('does not audit a direct-topic goal intake failure', async () => {
+    routing.project = project(true);
+
+    await create().onMessage(message({ content: '/goal finish the migration' }));
+
+    await vi.waitFor(() => expect(routing.send).toHaveBeenCalledTimes(1));
+    expect(routing.messageCompleted).not.toHaveBeenCalled();
   });
 
   it('does not respond to an unbound group without a bot mention', async () => {

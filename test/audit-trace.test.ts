@@ -17,6 +17,7 @@ import {
   traceArtifactPath,
   truncateAuditText,
   type AuditContext,
+  type TraceIo,
 } from '../src/core/audit-trace';
 import {
   currentLogContext,
@@ -33,6 +34,23 @@ function tempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'audit-trace-test-'));
   roots.push(root);
   return root;
+}
+
+function waitableArtifactIo(workspaceRoot: string): {
+  io: TraceIo;
+  wait: () => Promise<void>;
+} {
+  let pending = Promise.resolve();
+  return {
+    io: {
+      workspaceRoot,
+      now: () => fixedNow,
+      onArtifactWrite: (promise) => {
+        pending = promise;
+      },
+    },
+    wait: () => pending,
+  };
 }
 
 async function readRealLogEntry(marker: string): Promise<Record<string, unknown>> {
@@ -350,79 +368,135 @@ describe('emitTraceStep', () => {
 });
 
 describe('traceArtifactPath', () => {
-  it('sanitizes path segments and writes pretty JSON', () => {
+  it('returns the stable relative path before a waitable background write settles', async () => {
     const workspaceRoot = tempRoot();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let settled: Promise<void> | undefined;
+    const io = {
+      workspaceRoot,
+      now: () => fixedNow,
+      artifactWrite: async (file: string, body: string) => {
+        await blocked;
+        mkdirSync(join(file, '..'), { recursive: true });
+        writeFileSync(file, body, 'utf8');
+      },
+      onArtifactWrite: (promise: Promise<void>) => {
+        settled = promise;
+      },
+    } satisfies TraceIo;
+
+    const relative = traceArtifactPath('om_async', 'result.txt', 'background', 'text', io);
+
+    expect(relative).toBe('traces/artifacts/20250706/om_async/result.txt');
+    expect(() => readFileSync(join(workspaceRoot, relative!), 'utf8')).toThrow();
+    release();
+    await settled;
+    expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe('background');
+  });
+
+  it('absorbs a rejected background artifact write', async () => {
+    let settled: Promise<void> | undefined;
+    const relative = traceArtifactPath('om_failed', 'result.txt', 'content', 'text', {
+      workspaceRoot: tempRoot(),
+      now: () => fixedNow,
+      artifactWrite: async () => {
+        throw new Error('disk failed');
+      },
+      onArtifactWrite: (promise) => {
+        settled = promise;
+      },
+    } satisfies TraceIo);
+
+    expect(relative).toBe('traces/artifacts/20250706/om_failed/result.txt');
+    await expect(settled).resolves.toBeUndefined();
+  });
+
+  it('sanitizes path segments and writes pretty JSON', async () => {
+    const workspaceRoot = tempRoot();
+    const artifact = waitableArtifactIo(workspaceRoot);
     const relative = traceArtifactPath(
       '../om:1',
       '../result?.json',
       { ok: true, nested: { count: 2 } },
       'json',
-      { workspaceRoot, now: () => fixedNow },
+      artifact.io,
     );
 
     expect(relative).toBe('traces/artifacts/20250706/.._om_1/.._result_.json');
+    await artifact.wait();
     expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe(
       '{\n  "ok": true,\n  "nested": {\n    "count": 2\n  }\n}',
     );
   });
 
-  it('writes undefined JSON content as null', () => {
+  it('writes undefined JSON content as null', async () => {
     const workspaceRoot = tempRoot();
+    const artifact = waitableArtifactIo(workspaceRoot);
     const relative = traceArtifactPath(
       'om_undefined',
       'result.json',
       undefined,
       'json',
-      { workspaceRoot, now: () => fixedNow },
+      artifact.io,
     );
 
     expect(relative).toBe('traces/artifacts/20250706/om_undefined/result.json');
+    await artifact.wait();
     expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe('null');
   });
 
-  it('stringifies non-string message and artifact names before sanitizing', () => {
+  it('stringifies non-string message and artifact names before sanitizing', async () => {
     const workspaceRoot = tempRoot();
+    const artifact = waitableArtifactIo(workspaceRoot);
     const relative = traceArtifactPath(
       12345,
       67890,
       'content',
       'text',
-      { workspaceRoot, now: () => fixedNow },
+      artifact.io,
     );
 
     expect(relative).toBe('traces/artifacts/20250706/12345/67890');
+    await artifact.wait();
     expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe('content');
   });
 
-  it('replaces dot-only path segments so artifacts stay under the dated message directory', () => {
+  it('replaces dot-only path segments so artifacts stay under the dated message directory', async () => {
     const workspaceRoot = tempRoot();
+    const artifact = waitableArtifactIo(workspaceRoot);
     const relative = traceArtifactPath(
       '..',
       '..',
       'safe content',
       'text',
-      { workspaceRoot, now: () => fixedNow },
+      artifact.io,
     );
 
     expect(relative).toBe(
       'traces/artifacts/20250706/unknown-message/artifact',
     );
+    await artifact.wait();
     expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe('safe content');
   });
 
-  it('keeps ordinary dot-prefixed names compatible', () => {
+  it('keeps ordinary dot-prefixed names compatible', async () => {
     const workspaceRoot = tempRoot();
+    const artifact = waitableArtifactIo(workspaceRoot);
     const relative = traceArtifactPath(
       '.message',
       '.result.json',
       { ok: true },
       'json',
-      { workspaceRoot, now: () => fixedNow },
+      artifact.io,
     );
 
     expect(relative).toBe(
       'traces/artifacts/20250706/.message/.result.json',
     );
+    await artifact.wait();
     expect(readFileSync(join(workspaceRoot, relative!), 'utf8')).toBe(
       '{\n  "ok": true\n}',
     );
@@ -739,7 +813,7 @@ describe('emitMessageCompletedAudit', () => {
 });
 
 describe('best-effort disk handling', () => {
-  it('does not throw when the workspace root cannot be created beneath a file', () => {
+  it('does not throw when the workspace root cannot be created beneath a file', async () => {
     const root = tempRoot();
     const invalidRoot = join(root, 'not-a-directory');
     writeFileSync(invalidRoot, 'file', 'utf8');
@@ -748,12 +822,17 @@ describe('best-effort disk handling', () => {
     expect(() =>
       emitTraceStep({ input_text: 'hello' }, { workspaceRoot: invalidRoot, now: () => fixedNow }),
     ).not.toThrow();
+    let artifactSettled: Promise<void> | undefined;
     expect(
       traceArtifactPath('om_1', 'result.txt', 'hello', 'text', {
         workspaceRoot: invalidRoot,
         now: () => fixedNow,
+        onArtifactWrite: (promise) => {
+          artifactSettled = promise;
+        },
       }),
-    ).toBeNull();
+    ).toBe('traces/artifacts/20250706/om_1/result.txt');
+    await expect(artifactSettled).resolves.toBeUndefined();
     expect(() =>
       emitMessageCompletedAudit(
         { msgId: 'om_1', chatId: 'oc_1', threadId: null, senderId: null },

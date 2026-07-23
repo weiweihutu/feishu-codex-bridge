@@ -1,4 +1,5 @@
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import type { AgentEvent } from '../agent/types';
 import { paths } from '../config/paths';
@@ -15,6 +16,8 @@ const DEFAULT_TEXT_LIMIT = 20_000;
 export interface TraceIo {
   workspaceRoot?: string;
   now?: () => Date;
+  artifactWrite?: (file: string, body: string) => Promise<void>;
+  onArtifactWrite?: (settled: Promise<void>) => void;
 }
 
 export interface AuditMessage {
@@ -187,8 +190,20 @@ export function traceArtifactPath(
     const file = join(dir, safeName(name, 'artifact'));
     const body =
       kind === 'json' ? JSON.stringify(content ?? null, null, 2) : String(content ?? '');
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(file, body, 'utf8');
+    const write =
+      io.artifactWrite ??
+      (async (target: string, value: string) => {
+        await mkdir(dir, { recursive: true });
+        await writeFile(target, value, 'utf8');
+      });
+    const settled = Promise.resolve()
+      .then(() => write(file, body))
+      .catch(() => undefined);
+    try {
+      io.onArtifactWrite?.(settled);
+    } catch {
+      // Test/observer hooks are best-effort too.
+    }
     return relative(root, file);
   } catch {
     return null;
