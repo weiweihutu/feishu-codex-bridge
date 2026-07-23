@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { mapNotification } from '../src/agent/codex-appserver/event-map';
 import type { ServerNotification, ThreadItem } from '../src/agent/codex-appserver/protocol';
@@ -13,7 +14,7 @@ import {
   type RunState,
 } from '../src/card/run-state';
 
-function run(events: AgentEvent[]): RunState {
+function run(events: readonly AgentEvent[]): RunState {
   let s = initialState;
   for (const ev of events) s = reduce(s, ev);
   return s;
@@ -246,15 +247,28 @@ describe('buildRunCard', () => {
     expect(card.config.streaming_mode).toBe(true);
   });
 
-  it('drops tool blocks when showTools is false', () => {
-    const rs = run([
-      { type: 'tool_use', itemId: 't1', title: 'npm test' },
-      { type: 'text', itemId: 'm1', text: 'text only' },
+  it.each([
+    ['running', [{ type: 'tool_use', itemId: 't1', title: 'secret tool' }]],
+    ['terminal', [
+      { type: 'tool_use', itemId: 't1', title: 'secret tool' },
+      { type: 'tool_result', itemId: 't1', output: 'secret output' },
+      { type: 'text', itemId: 'm1', text: 'final answer' },
       { type: 'done', turnId: 'turn-1' },
-    ]);
-    const json = JSON.stringify(buildRunCard({ rs, showTools: false }));
-    expect(json).not.toContain('npm test');
-    expect(json).toContain('text only');
+    ]],
+  ] as const)('hides tool panels and counts while %s', (_name, events) => {
+    const json = JSON.stringify(buildRunCard({ rs: run(events), showTools: false }));
+    expect(json).not.toContain('secret tool');
+    expect(json).not.toContain('secret output');
+    expect(json).not.toMatch(/工具调用.*1/);
+  });
+
+  it('keeps ordinary launch render and card state tools disabled regardless of config', () => {
+    const source = readFileSync(new URL('../src/bot/handle-message.ts', import.meta.url), 'utf8');
+    const ordinaryLaunch = source.slice(source.indexOf('async function launchRun('), source.indexOf('async function launchGoalRun('));
+
+    expect(ordinaryLaunch).toContain('render.showTools = false');
+    expect(ordinaryLaunch).toMatch(/const rc: RunCardState = \{[\s\S]*?showTools: false,/);
+    expect(ordinaryLaunch).not.toContain('getShowToolCalls(cfg)');
   });
 });
 

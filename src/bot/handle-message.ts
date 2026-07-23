@@ -3900,12 +3900,12 @@ export function createOrchestrator(
         const turnStartAt = Date.now(); // turn/start 已在 runStreamed() 内发出（与下面的建卡并行）
         state.run = run;
         const render = new RunRender();
-        render.showTools = getShowToolCalls(cfg);
+        render.showTools = false;
         let cardMsgId: string | undefined;
         const rc: RunCardState = {
           rs: render.snapshot(),
           requesterOpenId: currentTurn.requesterOpenId,
-          showTools: render.showTools,
+          showTools: false,
           completionReminder: completionReminderView(state),
           // 模型显示档位：footnote 本轮 model·推理强度；always 档终态卡也保留。
           ...(modelDisp !== 'off' && turnModel
