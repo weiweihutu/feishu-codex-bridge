@@ -265,6 +265,9 @@ describe('mapNotification', () => {
       itemId: 'search-1',
       title: '联网搜索',
       kind: 'search',
+      toolType: 'web_search',
+      tool: 'web_search',
+      toolInput: { query: undefined },
     });
     // with a query, surface it in the title so the search isn't a blank「联网搜索」
     expect(mapNotification(itemStarted({ type: 'webSearch', id: 'search-2', query: '飞书 2026 更新' } as ThreadItem))).toEqual({
@@ -272,16 +275,113 @@ describe('mapNotification', () => {
       itemId: 'search-2',
       title: '联网搜索：飞书 2026 更新',
       kind: 'search',
+      toolType: 'web_search',
+      tool: 'web_search',
+      toolInput: { query: '飞书 2026 更新' },
     });
-    expect(mapNotification(itemStarted({ type: 'mcpToolCall', id: 'mcp-1' } as ThreadItem))).toEqual({
+    expect(
+      mapNotification(
+        itemStarted({
+          type: 'mcpToolCall',
+          id: 'mcp-1',
+          server: 'gbrain',
+          tool: 'query',
+          arguments: { orderId: 7 },
+          status: 'inProgress',
+        } as unknown as ThreadItem),
+      ),
+    ).toEqual({
       type: 'tool_use',
       itemId: 'mcp-1',
-      title: '工具调用',
+      title: 'gbrain.query',
       kind: 'tool',
+      toolType: 'mcp',
+      server: 'gbrain',
+      tool: 'query',
+      toolInput: { orderId: 7 },
+      status: 'inProgress',
     });
-    expect(mapNotification(itemCompleted({ type: 'dynamicToolCall', id: 'dyn-1' } as ThreadItem))).toEqual({
+    expect(
+      mapNotification(
+        itemStarted({
+          type: 'dynamicToolCall',
+          id: 'dyn-1',
+          tool: 'lookup',
+          arguments: { key: 'x' },
+          status: 'inProgress',
+        } as unknown as ThreadItem),
+      ),
+    ).toEqual({
+      type: 'tool_use',
+      itemId: 'dyn-1',
+      title: 'lookup',
+      kind: 'tool',
+      toolType: 'dynamic',
+      tool: 'lookup',
+      toolInput: { key: 'x' },
+      status: 'inProgress',
+    });
+    expect(
+      mapNotification(
+        itemCompleted({
+          type: 'dynamicToolCall',
+          id: 'dyn-1',
+          tool: 'lookup',
+          arguments: { key: 'x' },
+          status: 'failed',
+          error: { message: 'boom' },
+          output: 'partial',
+        } as unknown as ThreadItem),
+      ),
+    ).toMatchObject({
       type: 'tool_result',
       itemId: 'dyn-1',
+      output: 'partial',
+      toolType: 'dynamic',
+      tool: 'lookup',
+      status: 'failed',
+      error: { message: 'boom' },
+    });
+    expect(
+      mapNotification(
+        itemCompleted({
+          type: 'mcpToolCall',
+          id: 'mcp-2',
+          server: 'gbrain',
+          tool: 'query',
+          status: 'completed',
+          result: { content: [{ type: 'text', text: 'found' }] },
+          error: null,
+        } as unknown as ThreadItem),
+      ),
+    ).toMatchObject({
+      type: 'tool_result',
+      itemId: 'mcp-2',
+      output: '{"content":[{"type":"text","text":"found"}]}',
+      toolType: 'mcp',
+      server: 'gbrain',
+      tool: 'query',
+      status: 'completed',
+      error: null,
+    });
+    expect(
+      mapNotification(
+        itemCompleted({
+          type: 'webSearch',
+          id: 'search-2',
+          query: '飞书 2026 更新',
+          result: 'search result',
+          status: 'completed',
+        } as unknown as ThreadItem),
+      ),
+    ).toMatchObject({
+      type: 'tool_result',
+      itemId: 'search-2',
+      output: 'search result',
+      toolType: 'web_search',
+      tool: 'web_search',
+      toolInput: { query: '飞书 2026 更新' },
+      status: 'completed',
     });
   });
 

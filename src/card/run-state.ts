@@ -20,6 +20,13 @@ export interface ToolEntry {
   detail?: string;
   /** coarse category — drives rendering (command → full ```bash body). Absent ⇒ 'tool'. */
   kind?: ToolKind;
+  toolType?: 'command' | 'file' | 'web_search' | 'mcp' | 'dynamic' | 'tool';
+  server?: string;
+  tool?: string;
+  toolInput?: unknown;
+  /** Raw backend status; `status` below remains the card's visual state. */
+  traceStatus?: string;
+  error?: unknown;
   status: ToolStatus;
   output?: string;
   exitCode?: number | null;
@@ -152,6 +159,12 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         title: evt.title,
         detail: evt.detail,
         kind: evt.kind,
+        toolType: evt.toolType,
+        server: evt.server,
+        tool: evt.tool,
+        toolInput: evt.toolInput,
+        traceStatus: evt.status,
+        error: evt.error,
         status: 'running',
       };
       return {
@@ -163,7 +176,11 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
     }
 
     case 'tool_result': {
-      const isError = evt.exitCode != null && evt.exitCode !== 0;
+      const isError =
+        (evt.exitCode != null && evt.exitCode !== 0) ||
+        evt.error != null ||
+        evt.status === 'failed' ||
+        evt.status === 'declined';
       const blocks = state.blocks.map((b) => {
         if (b.kind !== 'tool' || b.tool.id !== evt.itemId) return b;
         return {
@@ -173,6 +190,12 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
             status: isError ? ('error' as const) : ('done' as const),
             output: evt.output,
             exitCode: evt.exitCode,
+            toolType: evt.toolType ?? b.tool.toolType,
+            server: evt.server ?? b.tool.server,
+            tool: evt.tool ?? b.tool.tool,
+            toolInput: evt.toolInput ?? b.tool.toolInput,
+            traceStatus: evt.status ?? b.tool.traceStatus,
+            error: evt.error ?? b.tool.error,
           },
         };
       });

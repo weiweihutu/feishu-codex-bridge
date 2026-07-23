@@ -72,6 +72,45 @@ describe('reduce', () => {
     expect(tools(s)[0]!.tool.status).toBe('done');
   });
 
+  it('preserves tool trace metadata from start through completion', () => {
+    const s = run([
+      {
+        type: 'tool_use',
+        itemId: 'mcp-1',
+        title: 'gbrain.query',
+        kind: 'tool',
+        toolType: 'mcp',
+        server: 'gbrain',
+        tool: 'query',
+        toolInput: { orderId: 7 },
+        status: 'inProgress',
+      },
+      {
+        type: 'tool_result',
+        itemId: 'mcp-1',
+        output: 'not found',
+        toolType: 'mcp',
+        server: 'gbrain',
+        tool: 'query',
+        status: 'failed',
+        error: { message: 'boom' },
+      },
+    ]);
+
+    expect(tools(s)[0]!.tool).toMatchObject({
+      id: 'mcp-1',
+      title: 'gbrain.query',
+      status: 'error',
+      toolType: 'mcp',
+      server: 'gbrain',
+      tool: 'query',
+      toolInput: { orderId: 7 },
+      traceStatus: 'failed',
+      error: { message: 'boom' },
+      output: 'not found',
+    });
+  });
+
   it('accumulates reasoning deltas and reconciles the final text', () => {
     const streaming = run([
       { type: 'thinking_delta', itemId: 'r', delta: 'think' },

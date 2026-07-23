@@ -82,6 +82,7 @@ export function mapNotification(n: ServerNotification, ctx?: MapContext): AgentE
 }
 
 function mapItemStart(item: ThreadItem, ctx?: MapContext): AgentEvent | null {
+  const raw = item as unknown as Record<string, unknown>;
   switch (item.type) {
     case 'commandExecution':
       return { type: 'tool_use', itemId: item.id, title: item.command, detail: String(item.cwd), kind: 'command' };
@@ -93,16 +94,40 @@ function mapItemStart(item: ThreadItem, ctx?: MapContext): AgentEvent | null {
         itemId: item.id,
         title: item.query ? `联网搜索：${item.query}` : '联网搜索',
         kind: 'search',
+        toolType: 'web_search',
+        tool: 'web_search',
+        toolInput: { query: item.query },
       };
     case 'mcpToolCall':
+      return {
+        type: 'tool_use',
+        itemId: item.id,
+        title: [item.server, item.tool].filter(Boolean).join('.') || '工具调用',
+        kind: 'tool',
+        toolType: 'mcp',
+        server: item.server,
+        tool: item.tool,
+        toolInput: raw.arguments ?? raw.input ?? raw.params,
+        status: item.status,
+      };
     case 'dynamicToolCall':
-      return { type: 'tool_use', itemId: item.id, title: '工具调用', kind: 'tool' };
+      return {
+        type: 'tool_use',
+        itemId: item.id,
+        title: item.tool || '动态工具调用',
+        kind: 'tool',
+        toolType: 'dynamic',
+        tool: item.tool,
+        toolInput: raw.arguments ?? raw.input ?? raw.params,
+        status: raw.status as string | undefined,
+      };
     default:
       return null;
   }
 }
 
 function mapItemComplete(item: ThreadItem): AgentEvent | null {
+  const raw = item as unknown as Record<string, unknown>;
   switch (item.type) {
     case 'agentMessage':
       return { type: 'text', itemId: item.id, text: item.text };
@@ -120,11 +145,49 @@ function mapItemComplete(item: ThreadItem): AgentEvent | null {
     case 'fileChange':
       return { type: 'tool_result', itemId: item.id, output: fileChangeDiffMd(item.changes) };
     case 'webSearch':
+      return {
+        type: 'tool_result',
+        itemId: item.id,
+        output: toolOutput(raw.result ?? raw.results),
+        toolType: 'web_search',
+        tool: 'web_search',
+        toolInput: { query: item.query },
+        status: raw.status as string | undefined,
+        error: raw.error,
+      };
     case 'mcpToolCall':
+      return {
+        type: 'tool_result',
+        itemId: item.id,
+        output: toolOutput(raw.result ?? raw.output ?? raw.response),
+        toolType: 'mcp',
+        server: item.server,
+        tool: item.tool,
+        status: item.status,
+        error: item.error,
+      };
     case 'dynamicToolCall':
-      return { type: 'tool_result', itemId: item.id };
+      return {
+        type: 'tool_result',
+        itemId: item.id,
+        output: toolOutput(raw.result ?? raw.output ?? raw.response ?? raw.contentItems),
+        toolType: 'dynamic',
+        tool: item.tool,
+        status: raw.status as string | undefined,
+        error: raw.error,
+      };
     default:
       return null;
+  }
+}
+
+function toolOutput(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
   }
 }
 

@@ -111,6 +111,15 @@ export interface ThreadHistory {
  */
 export type ToolKind = 'command' | 'file' | 'search' | 'tool';
 
+export interface AgentToolMetadata {
+  toolType?: 'command' | 'file' | 'web_search' | 'mcp' | 'dynamic' | 'tool';
+  server?: string;
+  tool?: string;
+  toolInput?: unknown;
+  status?: string;
+  error?: unknown;
+}
+
 /** Normalized stream events, mapped from app-server notifications. */
 export type AgentEvent =
   | { type: 'system'; threadId: string }
@@ -119,8 +128,8 @@ export type AgentEvent =
   | { type: 'text'; itemId: string; text: string }
   | { type: 'thinking_delta'; itemId: string; delta: string }
   | { type: 'thinking'; itemId: string; text: string }
-  | { type: 'tool_use'; itemId: string; title: string; detail?: string; kind?: ToolKind }
-  | { type: 'tool_result'; itemId: string; output?: string; exitCode?: number | null }
+  | ({ type: 'tool_use'; itemId: string; title: string; detail?: string; kind?: ToolKind } & AgentToolMetadata)
+  | ({ type: 'tool_result'; itemId: string; output?: string; exitCode?: number | null } & AgentToolMetadata)
   | { type: 'usage'; inputTokens?: number; outputTokens?: number }
   // Context-window usage for this thread (from thread/tokenUsage/updated). Drives
   // the run card's threshold gauge + the /context command. `contextWindow` is the
