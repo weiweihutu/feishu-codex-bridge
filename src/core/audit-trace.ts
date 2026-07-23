@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { paths } from '../config/paths';
-import { currentLogContext, log, type LogFields } from './logger';
+import { currentLogContext, log, withTrace, type LogFields } from './logger';
 
 const DEFAULT_TEXT_LIMIT = 20_000;
 
@@ -28,6 +28,18 @@ export type AuditContext = Record<string, unknown> & {
   threadId: string | null;
   senderId: string | null;
 };
+
+const AUDIT_CORE_KEYS = new Set([
+  'msgId',
+  'chatId',
+  'threadId',
+  'senderId',
+  'chatType',
+  'mentionedBot',
+  'messageText',
+  'messageTextTruncated',
+  'receivedAt',
+]);
 
 function workspaceRoot(io: TraceIo): string {
   return io.workspaceRoot ?? join(paths.appDir, 'my_workspace');
@@ -66,7 +78,11 @@ export function buildAuditContext(
   limit = DEFAULT_TEXT_LIMIT,
 ): AuditContext {
   const messageText = truncateAuditText(text ?? msg.content ?? '', limit);
+  const safeExtras = Object.fromEntries(
+    Object.entries(extras).filter(([key]) => !AUDIT_CORE_KEYS.has(key)),
+  );
   return {
+    ...safeExtras,
     msgId: msg.messageId,
     chatId: msg.chatId,
     threadId: msg.threadId ?? null,
@@ -76,7 +92,6 @@ export function buildAuditContext(
     messageText: messageText.text,
     messageTextTruncated: messageText.truncated,
     receivedAt: new Date(msg.createTime || Date.now()).toISOString(),
-    ...extras,
   };
 }
 
@@ -153,7 +168,17 @@ export function emitMessageCompletedAudit(
     replyTextTruncated: reply.truncated,
   };
 
-  log.info('audit', 'message_completed', payload as LogFields);
+  const finalContext = {
+    traceId: typeof payload.traceId === 'string' ? payload.traceId : undefined,
+    chatId: typeof payload.chatId === 'string' ? payload.chatId : undefined,
+    msgId: typeof payload.msgId === 'string' ? payload.msgId : undefined,
+  };
+  withTrace(finalContext, () => {
+    if (payload.traceId === undefined) {
+      payload.traceId = currentLogContext().traceId;
+    }
+    log.info('audit', 'message_completed', payload as LogFields);
+  });
 
   try {
     emitTraceStep(

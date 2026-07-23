@@ -1,6 +1,7 @@
 import {
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -16,7 +17,13 @@ import {
   truncateAuditText,
   type AuditContext,
 } from '../src/core/audit-trace';
-import { currentLogContext, log, withTrace } from '../src/core/logger';
+import {
+  currentLogContext,
+  log,
+  TEST_LOGS_DIR,
+  withTrace,
+  type LogContext,
+} from '../src/core/logger';
 
 const roots: string[] = [];
 const fixedNow = new Date('2025-07-06T12:34:56.789Z');
@@ -25,6 +32,24 @@ function tempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'audit-trace-test-'));
   roots.push(root);
   return root;
+}
+
+async function readRealLogEntry(marker: string): Promise<Record<string, unknown>> {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    try {
+      for (const name of readdirSync(TEST_LOGS_DIR)) {
+        if (!name.endsWith('.log')) continue;
+        for (const line of readFileSync(join(TEST_LOGS_DIR, name), 'utf8').split('\n')) {
+          if (!line.includes(marker)) continue;
+          return JSON.parse(line) as Record<string, unknown>;
+        }
+      }
+    } catch {
+      // The logger creates its temporary directory lazily.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`logger entry not flushed for marker ${marker}`);
 }
 
 afterEach(() => {
@@ -36,6 +61,20 @@ afterEach(() => {
 });
 
 describe('currentLogContext', () => {
+  it('withTrace preserves the return type of a synchronous callback', () => {
+    const result = withTrace(
+      { traceId: 'trace-sync', chatId: 'chat-sync', msgId: 'msg-sync' },
+      () => currentLogContext(),
+    );
+
+    expectTypeOf(result).toEqualTypeOf<Readonly<LogContext>>();
+    expect(result).toEqual({
+      traceId: 'trace-sync',
+      chatId: 'chat-sync',
+      msgId: 'msg-sync',
+    });
+  });
+
   it('returns a shallow copy that cannot mutate the active context', async () => {
     await withTrace({ traceId: 'trace-1', chatId: 'chat-1', msgId: 'msg-1' }, async () => {
       const copy = currentLogContext() as {
@@ -134,6 +173,46 @@ describe('buildAuditContext', () => {
 
     expect(audit.messageText).toBe('message fallback');
     expect(audit.messageTextTruncated).toBe(false);
+  });
+
+  it('does not let extras override core audit fields', () => {
+    const audit = buildAuditContext(
+      {
+        messageId: 'om_core',
+        chatId: 'oc_core',
+        threadId: 'omt_core',
+        senderId: 'ou_core',
+        chatType: 'group',
+        mentionedBot: true,
+        createTime: Date.parse('2025-07-04T00:00:00.000Z'),
+      },
+      'core text',
+      {
+        msgId: 'bad-msg',
+        chatId: 'bad-chat',
+        threadId: 'bad-thread',
+        senderId: 'bad-sender',
+        chatType: 'bad-type',
+        mentionedBot: false,
+        messageText: 'bad-text',
+        messageTextTruncated: true,
+        receivedAt: 'bad-time',
+        project: 'demo',
+      },
+    );
+
+    expect(audit).toEqual({
+      msgId: 'om_core',
+      chatId: 'oc_core',
+      threadId: 'omt_core',
+      senderId: 'ou_core',
+      chatType: 'group',
+      mentionedBot: true,
+      messageText: 'core text',
+      messageTextTruncated: false,
+      receivedAt: '2025-07-04T00:00:00.000Z',
+      project: 'demo',
+    });
   });
 });
 
@@ -269,6 +348,77 @@ describe('traceArtifactPath', () => {
 });
 
 describe('emitMessageCompletedAudit', () => {
+  it('writes final correlation IDs at the top level of the real logger entry', async () => {
+    expect(process.env.VITEST).toBeTruthy();
+    const noContextRoot = tempRoot();
+    const noContextMarker = `audit-real-no-context-${Date.now()}-${Math.random()}`;
+    emitMessageCompletedAudit(
+      {
+        msgId: 'audit-msg',
+        chatId: 'audit-chat',
+        threadId: 'audit-thread',
+        senderId: 'audit-sender',
+      },
+      {
+        traceId: 'audit-trace',
+        replyText: 'answer',
+        testMarker: noContextMarker,
+      },
+      { workspaceRoot: noContextRoot, now: () => fixedNow },
+    );
+
+    const noContextEntry = await readRealLogEntry(noContextMarker);
+    expect(noContextEntry).toEqual(
+      expect.objectContaining({
+        phase: 'audit',
+        event: 'message_completed',
+        traceId: 'audit-trace',
+        chatId: 'audit-chat',
+        msgId: 'audit-msg',
+      }),
+    );
+
+    const overrideRoot = tempRoot();
+    const overrideMarker = `audit-real-override-${Date.now()}-${Math.random()}`;
+    withTrace(
+      { traceId: 'outer-trace', chatId: 'outer-chat', msgId: 'outer-msg' },
+      () => {
+        emitMessageCompletedAudit(
+          undefined,
+          {
+            traceId: 'field-trace',
+            chatId: 'field-chat',
+            msgId: 'field-msg',
+            threadId: 'field-thread',
+            replyText: 'answer',
+            testMarker: overrideMarker,
+          },
+          { workspaceRoot: overrideRoot, now: () => fixedNow },
+        );
+      },
+    );
+
+    const overrideEntry = await readRealLogEntry(overrideMarker);
+    expect(overrideEntry).toEqual(
+      expect.objectContaining({
+        phase: 'audit',
+        event: 'message_completed',
+        traceId: 'field-trace',
+        chatId: 'field-chat',
+        msgId: 'field-msg',
+      }),
+    );
+    const traceEntry = JSON.parse(
+      readFileSync(
+        join(overrideRoot, 'traces', 'logs', 'trace-20250706.log'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(overrideEntry.traceId).toBe(traceEntry.trace_id);
+    expect(overrideEntry.chatId).toBe(traceEntry.chat_id);
+    expect(overrideEntry.msgId).toBe(traceEntry.msg_id);
+  });
+
   it('logs the completed audit and emits the composed-response trace', async () => {
     const workspaceRoot = tempRoot();
     const info = vi.spyOn(log, 'info').mockImplementation(() => undefined);

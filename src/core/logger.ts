@@ -224,7 +224,7 @@ export const log = {
 };
 
 /** Run `fn` inside a logging context; all `log.*` inside pick up the fields. */
-export function withTrace<T>(ctx: LogContext, fn: () => Promise<T>): Promise<T> {
+export function withTrace<T>(ctx: LogContext, fn: () => T): T {
   const traceId = ctx.traceId ?? newTraceId();
   return als.run({ ...ctx, traceId }, fn);
 }
