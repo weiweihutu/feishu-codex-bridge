@@ -1,5 +1,5 @@
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { copyFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
@@ -40,6 +40,23 @@ interface ImageRef {
   fileKey: string;
 }
 
+export interface PersistedImageFile {
+  index: number;
+  imageKey: string;
+  messageId: string;
+  fileName: string;
+  mimeType: string;
+  size?: number;
+  relativePath: string;
+}
+
+export type InboundImages = string[] & { imageFiles?: PersistedImageFile[] };
+
+export interface InboundImageOptions {
+  workspaceRoot?: string;
+  now?: () => Date;
+}
+
 const EXT_BY_CONTENT_TYPE: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
@@ -66,7 +83,11 @@ export function messageHasImages(msg: NormalizedMessage): boolean {
  * single failed download is logged and skipped, never thrown — a missing image
  * must not break the turn.
  */
-export async function collectInboundImages(channel: LarkChannel, msg: NormalizedMessage): Promise<string[]> {
+export async function collectInboundImages(
+  channel: LarkChannel,
+  msg: NormalizedMessage,
+  options: InboundImageOptions = {},
+): Promise<InboundImages> {
   let refs: ImageRef[];
   try {
     refs = await gatherRefs(channel, msg);
@@ -83,12 +104,39 @@ export async function collectInboundImages(channel: LarkChannel, msg: Normalized
     /* mkdir failure surfaces on writeFile below */
   }
 
-  const out: string[] = [];
+  const out = [] as InboundImages;
+  const imageFiles: PersistedImageFile[] = [];
+  const workspaceRoot = options.workspaceRoot ?? join(paths.appDir, 'my_workspace');
+  const day = dateKey((options.now ?? (() => new Date()))());
   let index = 0;
   for (const ref of refs.slice(0, MAX_IMAGES)) {
-    const path = await downloadOne(channel, ref, index++);
-    if (path) out.push(path);
+    const imageIndex = index++;
+    const downloaded = await downloadOne(channel, ref, imageIndex);
+    if (!downloaded) continue;
+
+    out.push(downloaded.path);
+    try {
+      const messageDir = safeName(msg.messageId);
+      const fileName = `image_${imageIndex + 1}.${downloaded.ext}`;
+      const persistentDir = join(workspaceRoot, 'attachments', 'feishu_images', day, messageDir);
+      const persistentFile = join(persistentDir, fileName);
+      await mkdir(persistentDir, { recursive: true });
+      await copyFile(downloaded.path, persistentFile);
+      const size = (await stat(persistentFile)).size;
+      imageFiles.push({
+        index: imageIndex + 1,
+        imageKey: ref.fileKey,
+        messageId: ref.messageId,
+        fileName,
+        mimeType: downloaded.contentType,
+        size,
+        relativePath: relative(workspaceRoot, persistentFile),
+      });
+    } catch (err) {
+      log.warn('intake', 'image-persist-failed', { fileKey: ref.fileKey.slice(0, 24), err: String(err) });
+    }
   }
+  if (imageFiles.length > 0) out.imageFiles = imageFiles;
   log.info('intake', 'images', { found: refs.length, downloaded: out.length });
   return out;
 }
@@ -171,16 +219,23 @@ function walkForImageKeys(node: unknown, out: string[]): void {
   for (const k of Object.keys(obj)) walkForImageKeys(obj[k], out);
 }
 
-async function downloadOne(channel: LarkChannel, ref: ImageRef, index: number): Promise<string | undefined> {
+interface DownloadedImage {
+  path: string;
+  ext: string;
+  contentType: string;
+}
+
+async function downloadOne(channel: LarkChannel, ref: ImageRef, index: number): Promise<DownloadedImage | undefined> {
   try {
     const res = await channel.rawClient.im.v1.messageResource.get({
       path: { message_id: ref.messageId, file_key: ref.fileKey },
       params: { type: 'image' },
     });
     const ext = extFromHeaders(res.headers);
+    const contentType = normalizedContentType(res.headers) ?? `image/${ext}`;
     const file = join(paths.mediaDir, `${safeName(ref.fileKey)}-${index}.${ext}`);
     await res.writeFile(file);
-    return file;
+    return { path: file, ext, contentType };
   } catch (err) {
     // Forwarded sub-message images land here (Feishu rejects message-resource
     // for merge_forward children) — info, not error: the turn still proceeds.
@@ -189,12 +244,14 @@ async function downloadOne(channel: LarkChannel, ref: ImageRef, index: number): 
   }
 }
 
+function normalizedContentType(headers: unknown): string | undefined {
+  const contentType = readHeader(headers, 'content-type')?.split(';')[0]?.trim().toLowerCase();
+  return contentType || undefined;
+}
+
 function extFromHeaders(headers: unknown): string {
-  const ct = readHeader(headers, 'content-type');
-  if (ct) {
-    const base = ct.split(';')[0]?.trim().toLowerCase();
-    if (base && EXT_BY_CONTENT_TYPE[base]) return EXT_BY_CONTENT_TYPE[base];
-  }
+  const contentType = normalizedContentType(headers);
+  if (contentType && EXT_BY_CONTENT_TYPE[contentType]) return EXT_BY_CONTENT_TYPE[contentType];
   return 'png';
 }
 
@@ -207,7 +264,15 @@ function readHeader(headers: unknown, name: string): string | undefined {
 
 /** Feishu image_keys are filename-safe already; sanitize defensively + clamp. */
 function safeName(fileKey: string): string {
-  return fileKey.replace(/[^a-zA-Z0-9_-]/g, '').slice(-40) || 'img';
+  const safe = fileKey.replace(/[^a-zA-Z0-9_-]/g, '').slice(-40);
+  return safe && safe !== '.' && safe !== '..' ? safe : 'img';
+}
+
+function dateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
 }
 
 async function pruneOldMedia(dir: string): Promise<void> {

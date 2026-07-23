@@ -1,13 +1,30 @@
-import { describe, expect, it } from 'vitest';
-import type { NormalizedMessage } from '@larksuiteoapi/node-sdk';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk';
+
+vi.mock('../src/config/paths', async () => {
+  const { tmpdir: systemTmpdir } = await import('node:os');
+  const { join: joinPath } = await import('node:path');
+  return {
+    paths: {
+      appDir: joinPath(systemTmpdir(), `feishu-media-app-${process.pid}`),
+      mediaDir: joinPath(systemTmpdir(), `feishu-media-downloads-${process.pid}`),
+    },
+  };
+});
+
 import {
   cleanFileName,
+  collectInboundImages,
   imageKeysFromContent,
   messageHasFiles,
   messageHasImages,
   stripFileTokens,
   weaveFileManifest,
 } from '../src/bot/media';
+import { paths } from '../src/config/paths';
 
 function msg(overrides: Partial<NormalizedMessage> = {}): NormalizedMessage {
   return {
@@ -26,6 +43,49 @@ function msg(overrides: Partial<NormalizedMessage> = {}): NormalizedMessage {
   } as NormalizedMessage;
 }
 
+const tempRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+afterAll(async () => {
+  await Promise.all([paths.appDir, paths.mediaDir].map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+async function tempRoot(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'feishu-media-test-'));
+  tempRoots.push(dir);
+  return dir;
+}
+
+function imageChannel(
+  images: Array<{ body: string; contentType?: string; afterWrite?: (path: string) => Promise<void> }> = [],
+): LarkChannel {
+  let call = 0;
+  return {
+    rawClient: {
+      im: {
+        v1: {
+          messageResource: {
+            get: async () => {
+              const image = images[call++];
+              if (!image) throw new Error('unexpected image download');
+              return {
+                headers: image.contentType ? { 'content-type': image.contentType } : {},
+                writeFile: async (path: string) => {
+                  await writeFile(path, image.body);
+                  await image.afterWrite?.(path);
+                },
+              };
+            },
+          },
+        },
+      },
+    },
+  } as unknown as LarkChannel;
+}
+
 describe('messageHasImages', () => {
   it('is true when an image resource is present', () => {
     expect(messageHasImages(msg({ resources: [{ type: 'image', fileKey: 'img_1' }] }))).toBe(true);
@@ -36,6 +96,101 @@ describe('messageHasImages', () => {
   it('is false for plain text / non-image resources', () => {
     expect(messageHasImages(msg())).toBe(false);
     expect(messageHasImages(msg({ resources: [{ type: 'file', fileKey: 'file_1' }] }))).toBe(false);
+  });
+});
+
+describe('collectInboundImages persistence', () => {
+  it('keeps the temporary image and adds complete durable audit metadata', async () => {
+    const root = await tempRoot();
+    const images = await collectInboundImages(
+      imageChannel([{ body: 'png-body', contentType: ' Image/PNG; charset=binary ' }]),
+      msg({ messageId: 'om_x', resources: [{ type: 'image', fileKey: 'img_1' }] }),
+      { workspaceRoot: root, now: () => new Date(2026, 6, 23, 0, 30) },
+    );
+
+    expect(images).toHaveLength(1);
+    expect(await readFile(images[0]!, 'utf8')).toBe('png-body');
+    expect(images.imageFiles).toEqual([
+      {
+        index: 1,
+        imageKey: 'img_1',
+        messageId: 'om_x',
+        fileName: 'image_1.png',
+        mimeType: 'image/png',
+        size: 8,
+        relativePath: 'attachments/feishu_images/20260723/om_x/image_1.png',
+      },
+    ]);
+    expect(await readFile(join(root, images.imageFiles![0]!.relativePath), 'utf8')).toBe('png-body');
+  });
+
+  it('retains the temporary vision path when the durable copy fails', async () => {
+    const root = await tempRoot();
+    const blockedRoot = join(root, 'not-a-directory');
+    await writeFile(blockedRoot, 'blocked');
+
+    const images = await collectInboundImages(
+      imageChannel([{ body: 'vision-data', contentType: 'image/jpeg' }]),
+      msg({ resources: [{ type: 'image', fileKey: 'img_copy_failure' }] }),
+      { workspaceRoot: blockedRoot, now: () => new Date(2026, 6, 23) },
+    );
+
+    expect(images).toHaveLength(1);
+    expect(await readFile(images[0]!, 'utf8')).toBe('vision-data');
+    expect(images.imageFiles).toBeUndefined();
+  });
+
+  it('keeps all temporary paths when only some durable copies succeed', async () => {
+    const root = await tempRoot();
+    const durableDir = join(root, 'attachments', 'feishu_images', '20260723', 'om_x');
+    const images = await collectInboundImages(
+      imageChannel([
+        { body: 'first', contentType: 'image/webp' },
+        {
+          body: 'second',
+          contentType: 'image/gif',
+          afterWrite: async () => {
+            await mkdir(join(durableDir, 'image_2.gif'), { recursive: true });
+          },
+        },
+      ]),
+      msg({
+        resources: [
+          { type: 'image', fileKey: 'img_first' },
+          { type: 'image', fileKey: 'img_second' },
+        ],
+      }),
+      { workspaceRoot: root, now: () => new Date(2026, 6, 23) },
+    );
+
+    expect(images).toHaveLength(2);
+    expect(await Promise.all(images.map((path) => readFile(path, 'utf8')))).toEqual(['first', 'second']);
+    expect(images.imageFiles).toHaveLength(1);
+    expect(images.imageFiles?.[0]).toMatchObject({
+      index: 1,
+      imageKey: 'img_first',
+      fileName: 'image_1.webp',
+      mimeType: 'image/webp',
+    });
+  });
+
+  it('uses the injected local date, sanitizes dot path segments, and infers mime type', async () => {
+    const root = await tempRoot();
+    const images = await collectInboundImages(
+      imageChannel([{ body: 'fallback' }]),
+      msg({ messageId: '..', resources: [{ type: 'image', fileKey: 'img/unsafe' }] }),
+      { workspaceRoot: root, now: () => new Date(2026, 0, 2, 0, 15) },
+    );
+
+    expect(images.imageFiles?.[0]).toMatchObject({
+      index: 1,
+      imageKey: 'img/unsafe',
+      messageId: '..',
+      fileName: 'image_1.png',
+      mimeType: 'image/png',
+      relativePath: 'attachments/feishu_images/20260102/img/image_1.png',
+    });
+    expect(await readFile(join(root, images.imageFiles![0]!.relativePath), 'utf8')).toBe('fallback');
   });
 });
 
