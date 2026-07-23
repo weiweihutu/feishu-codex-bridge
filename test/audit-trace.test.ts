@@ -13,6 +13,7 @@ import {
   buildAuditContext,
   emitMessageCompletedAudit,
   emitTraceStep,
+  traceFieldsForAgentEvent,
   traceArtifactPath,
   truncateAuditText,
   type AuditContext,
@@ -101,6 +102,87 @@ describe('truncateAuditText', () => {
 
   it('truncates text over the limit', () => {
     expect(truncateAuditText('abcdef', 5)).toEqual({ text: 'abcde', truncated: true });
+  });
+});
+
+describe('traceFieldsForAgentEvent', () => {
+  it('maps gbrain MCP start metadata', () => {
+    expect(traceFieldsForAgentEvent({
+      type: 'tool_use',
+      itemId: 'mcp-1',
+      title: 'gbrain.query',
+      toolType: 'mcp',
+      server: 'gbrain',
+      tool: 'query',
+      toolInput: { id: 7 },
+    })).toMatchObject({
+      step_name: 'gbrain.mcp_started',
+      step_type: 'mcp',
+      item_id: 'mcp-1',
+      tool_server: 'gbrain',
+      tool_name: 'query',
+      request_json: { id: 7 },
+      status: 'success',
+    });
+  });
+
+  it('maps ordinary tool start metadata', () => {
+    expect(traceFieldsForAgentEvent({
+      type: 'tool_use',
+      itemId: 'tool-1',
+      title: 'run command',
+      toolType: 'command',
+      tool: 'exec',
+      toolInput: { cmd: 'pwd' },
+    })).toEqual(expect.objectContaining({
+      step_name: 'tool.started',
+      step_type: 'command',
+      item_id: 'tool-1',
+      tool_name: 'exec',
+      request_json: { cmd: 'pwd' },
+      status: 'success',
+    }));
+  });
+
+  it('maps gbrain MCP completion output and failure status', () => {
+    expect(traceFieldsForAgentEvent({
+      type: 'tool_result',
+      itemId: 'mcp-1',
+      toolType: 'mcp',
+      server: 'gbrain',
+      tool: 'query',
+      output: '{"rows":[]}',
+      status: 'failed',
+      error: 'query failed',
+    })).toEqual(expect.objectContaining({
+      step_name: 'gbrain.mcp_completed',
+      step_type: 'mcp',
+      item_id: 'mcp-1',
+      tool_server: 'gbrain',
+      tool_name: 'query',
+      output_text: '{"rows":[]}',
+      status: 'error',
+      error: 'query failed',
+    }));
+  });
+
+  it('maps ordinary tool completion and ignores non-tool events', () => {
+    expect(traceFieldsForAgentEvent({
+      type: 'tool_result',
+      itemId: 'tool-1',
+      toolType: 'command',
+      tool: 'exec',
+      output: 'ok',
+      status: 'completed',
+    })).toEqual(expect.objectContaining({
+      step_name: 'tool.completed',
+      step_type: 'command',
+      item_id: 'tool-1',
+      tool_name: 'exec',
+      output_text: 'ok',
+      status: 'completed',
+    }));
+    expect(traceFieldsForAgentEvent({ type: 'text_delta', itemId: 'text-1', delta: 'hello' })).toBeNull();
   });
 });
 

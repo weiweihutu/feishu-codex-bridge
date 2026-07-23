@@ -98,8 +98,16 @@ import {
   buildCompactingCard,
   buildContextCard,
 } from '../card/context-gauge';
-import { log, withTrace } from '../core/logger';
-import { shouldRespondWithoutMention } from './feishu-message-policy';
+import { currentLogContext, log, withTrace } from '../core/logger';
+import {
+  buildAuditContext,
+  emitMessageCompletedAudit,
+  emitTraceStep,
+  traceArtifactPath,
+  traceFieldsForAgentEvent,
+  type AuditContext,
+} from '../core/audit-trace';
+import { appendFeishuContext, shouldRespondWithoutMention } from './feishu-message-policy';
 import {
   buildAddAdminCard,
   buildAddAllowedCard,
@@ -188,6 +196,7 @@ import {
   messageHasImages,
   stripFileTokens,
   weaveFileManifest,
+  type InboundImages,
 } from './media';
 import {
   fetchQuotedMessage,
@@ -814,7 +823,8 @@ export function createOrchestrator(
       chatType: msg.chatType,
       mentionedBot: msg.mentionedBot,
       threadId: msg.threadId ?? null,
-      preview: msg.content.slice(0, 40),
+      senderId: msg.senderId,
+      textLen: msg.content.length,
     });
 
     if (msg.chatType === 'p2p') {
@@ -1246,7 +1256,7 @@ export function createOrchestrator(
     flat: boolean,
     project: Project | undefined,
     perm: TurnPerm,
-    preloadedImages?: string[],
+    preloadedImages?: InboundImages,
     preIngested?: boolean,
     summaryText?: string,
     goal?: boolean,
@@ -1378,13 +1388,55 @@ export function createOrchestrator(
         // weaving chat transcript into a goal would pollute it and risk a
         // rejected thread/goal/set.
         if (topicId && (codexEmpty || prior?.lastSeenAt !== undefined)) {
+          const historyStartedAt = Date.now();
           const history = codexEmpty
             ? prior && prior.lastSeenAt === undefined
               ? // 投机被跳过的唯一组合（有记录无水位）撞上 recreated 罕见路径：补拉全量
                 await fetchThreadContext(channel, topicId, { excludeMessageId: msg.messageId })
               : specHistory
             : filterHistorySince(specHistory, prior?.lastSeenAt ?? 0);
+          const historyCompletedAt = Date.now();
+          emitTraceStep({
+            msg_id: msg.messageId,
+            trace_id: currentLogContext().traceId,
+            chat_id: msg.chatId,
+            thread_id: msg.threadId ?? null,
+            project: project?.name ?? '(unregistered)',
+            session_key: sessionKey,
+            session_id: thread.sessionId,
+            step_name: 'context.thread_history_loaded',
+            step_type: 'context',
+            started_at: new Date(historyStartedAt).toISOString(),
+            completed_at: new Date(historyCompletedAt).toISOString(),
+            elapsed_ms: historyCompletedAt - historyStartedAt,
+            output_text: `history_count=${history.length}`,
+            response_json: { historyCount: history.length },
+          });
           firstText = weaveThreadHistory(firstText, history);
+        }
+        if (!goal) {
+          firstText = appendFeishuContext(firstText, msg);
+          const promptBuiltAt = Date.now();
+          emitTraceStep({
+            msg_id: msg.messageId,
+            trace_id: currentLogContext().traceId,
+            chat_id: msg.chatId,
+            thread_id: msg.threadId ?? null,
+            project: project?.name ?? '(unregistered)',
+            session_key: sessionKey,
+            session_id: thread.sessionId,
+            step_name: 'codex.prompt_built',
+            step_type: 'context',
+            started_at: new Date(promptBuiltAt).toISOString(),
+            completed_at: new Date(promptBuiltAt).toISOString(),
+            elapsed_ms: 0,
+            input_text: firstText,
+            request_json: {
+              promptChars: firstText.length,
+              hasThreadId: Boolean(msg.threadId),
+              imageCount: images?.length ?? 0,
+            },
+          });
         }
         // Advance the high-water mark so the NEXT turn only catches up新消息.
         // (a brand-new session already wrote it in the upsert above.)
@@ -1402,6 +1454,18 @@ export function createOrchestrator(
           summary: stripFileTokens(summaryText ?? text).slice(0, 80) || '(本轮任务)',
           requesterOpenId: msg.senderId,
           requestedAt: msg.createTime || tIntake,
+          ...(!goal
+            ? {
+                audit: buildAuditContext(msg, summaryText ?? text, {
+                  project: project?.name ?? '(unregistered)',
+                  model: prior?.model,
+                  effort: prior?.effort,
+                  images: images?.length ?? 0,
+                  imageFiles: images?.imageFiles ?? [],
+                  startedAt: new Date(tIntake).toISOString(),
+                }),
+              }
+            : {}),
           // 编织完成 → turn/start 之间不再读盘：首轮直接用预取的会话记录
           // （prior=undefined 即确知是全新会话，刚 upsert 的记录还没有 model）。
           firstRec: prior ?? null,
@@ -1556,13 +1620,14 @@ export function createOrchestrator(
       let thread: AgentThread;
       let model: string;
       let effort: ReasoningEffort;
-      let images: string[] | undefined;
+      let images: InboundImages | undefined;
       let firstText: string;
       try {
         const [started, imgs, ingested] = await Promise.all([threadP, imagesP, ingestP]);
         ({ thread, model, effort } = started);
         images = imgs;
         firstText = ingested || '你好，我们开始吧。';
+        if (!goal) firstText = appendFeishuContext(firstText, msg);
       } catch (err) {
         reaction?.done();
         // 失败路互不拖死：threadP 若已成功则回收孤儿进程，若失败吞掉其 rejection。
@@ -1574,6 +1639,28 @@ export function createOrchestrator(
         return;
       }
       log.info('card', 'start', { project: project?.name ?? '(unregistered)', model, effort, images: images?.length ?? 0, goal: Boolean(goal) });
+      if (!goal) {
+        const promptBuiltAt = Date.now();
+        emitTraceStep({
+          msg_id: msg.messageId,
+          trace_id: currentLogContext().traceId,
+          chat_id: msg.chatId,
+          thread_id: msg.threadId ?? null,
+          project: project?.name ?? '(unregistered)',
+          session_id: thread.sessionId,
+          step_name: 'codex.prompt_built',
+          step_type: 'context',
+          started_at: new Date(promptBuiltAt).toISOString(),
+          completed_at: new Date(promptBuiltAt).toISOString(),
+          elapsed_ms: 0,
+          input_text: firstText,
+          request_json: {
+            promptChars: firstText.length,
+            hasThreadId: Boolean(msg.threadId),
+            imageCount: images?.length ?? 0,
+          },
+        });
+      }
       const launchOpts: LaunchOpts = {
         chatId: msg.chatId,
         replyTo: msg.messageId,
@@ -1587,6 +1674,18 @@ export function createOrchestrator(
         summary: stripFileTokens(text).slice(0, 80) || '(空)',
         requesterOpenId: msg.senderId,
         requestedAt: msg.createTime || tIntake,
+        ...(!goal
+          ? {
+              audit: buildAuditContext(msg, text, {
+                project: project?.name ?? '(unregistered)',
+                model,
+                effort,
+                images: images?.length ?? 0,
+                imageFiles: images?.imageFiles ?? [],
+                startedAt: new Date(tIntake).toISOString(),
+              }),
+            }
+          : {}),
         roleSuffix: perm.roleSuffix,
         backendId: be.id,
         timing: { tResolve: tResolveDone - tIntake, tWeave: Date.now() - tIntake },
@@ -3498,6 +3597,8 @@ export function createOrchestrator(
      * tResolve = resolveThread/startThread settled, tWeave = 编织完成（含话题
      * 上文投机拉取），both measured from intake start (M-1 observability). */
     timing?: { tResolve: number; tWeave: number };
+    /** Audit is attached only to ordinary message turns, never goals/comments. */
+    audit?: AuditContext;
   }
 
   /** The queue placeholder card's CardKit entity, handed to the run for in-place
@@ -3639,6 +3740,8 @@ export function createOrchestrator(
     // intake durations ride the FIRST turn's stream.timing line only (M-1)
     let intake = opts.timing;
     let firstRec = opts.firstRec;
+    let currentAudit = opts.audit;
+    let completionEmitted = false;
     try {
       let currentTurn: QueuedTurn = {
         input: { text: opts.firstText, images: opts.images },
@@ -3791,6 +3894,7 @@ export function createOrchestrator(
         let lastEvAt = tStart;
         let evCount = 0;
         let textChars = 0;
+        const toolStartedAt = new Map<string, number>();
         for await (const ev of guarded) {
           const tEv = Date.now();
           if (!firstEvAt) firstEvAt = tEv;
@@ -3813,6 +3917,30 @@ export function createOrchestrator(
             void sendManagedCard(channel, opts.chatId, buildAutoCompactCard(), cardMsgId, !opts.flat).catch((err) =>
               log.fail('card', err, { phase: 'auto-compact-notice' }),
             );
+          }
+          if (ev.type === 'tool_use' || ev.type === 'tool_result') {
+            const trace = traceFieldsForAgentEvent(ev)!;
+            if (ev.type === 'tool_use') toolStartedAt.set(ev.itemId, tEv);
+            const started = toolStartedAt.get(ev.itemId) ?? tEv;
+            const artifact =
+              ev.type === 'tool_result' && ev.output && ev.output.length > 20_000
+                ? traceArtifactPath(currentAudit?.msgId, `${ev.itemId}-output.txt`, ev.output)
+                : null;
+            emitTraceStep({
+              msg_id: currentAudit?.msgId,
+              trace_id: currentLogContext().traceId,
+              chat_id: opts.chatId,
+              thread_id: topicThreadId ?? null,
+              project: currentAudit?.project,
+              session_id: opts.thread.sessionId,
+              started_at: new Date(started).toISOString(),
+              completed_at: new Date(tEv).toISOString(),
+              elapsed_ms: tEv - started,
+              model: turnModel,
+              ...trace,
+              ...(artifact ? { output_text: '', artifact_paths: [artifact] } : {}),
+            });
+            if (ev.type === 'tool_result') toolStartedAt.delete(ev.itemId);
           }
           render.apply(ev);
           rc.rs = render.snapshot();
@@ -3948,6 +4076,22 @@ export function createOrchestrator(
         replyTo = finalMsgId;
         replyInThread = !opts.flat; // stay in the topic for queued turns (single: stay flat)
         log.info('card', 'final', { terminal: render.terminal() });
+        if (currentAudit && !completionEmitted) {
+          const replyText = finalMessageText(rc.rs);
+          const completedAt = Date.now();
+          emitMessageCompletedAudit(currentAudit, {
+            completedAt: new Date(completedAt).toISOString(),
+            elapsedMs: completedAt - Date.parse(String(currentAudit.startedAt ?? completedAt)),
+            terminal: rc.rs.terminal,
+            replyText,
+            textChars: replyText.length,
+            images: rc.images?.size ?? 0,
+            imageFiles: currentAudit.imageFiles ?? [],
+            model: turnModel,
+          });
+          completionEmitted = true;
+          currentAudit = undefined;
+        }
 
         // A stop (⏹ graceful or forced / watchdog) or a dead process ends the
         // whole run — drop any queued follow-ups, but tell the user instead of
@@ -3975,6 +4119,20 @@ export function createOrchestrator(
       }
     } catch (err) {
       log.fail('intake', err);
+      if (currentAudit && !completionEmitted) {
+        const completedAt = Date.now();
+        emitMessageCompletedAudit(currentAudit, {
+          completedAt: new Date(completedAt).toISOString(),
+          elapsedMs: completedAt - Date.parse(String(currentAudit.startedAt ?? completedAt)),
+          terminal: 'error',
+          error: err instanceof Error ? err.message : String(err),
+          replyText: '',
+          textChars: 0,
+          images: 0,
+          imageFiles: currentAudit.imageFiles ?? [],
+        });
+        completionEmitted = true;
+      }
       await channel
         .send(opts.chatId, { markdown: `❌ ${err instanceof Error ? err.message : String(err)}` }, { replyTo: opts.replyTo, replyInThread: !opts.flat })
         .catch(() => undefined);

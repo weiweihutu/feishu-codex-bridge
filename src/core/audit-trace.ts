@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import type { AgentEvent } from '../agent/types';
 import { paths } from '../config/paths';
 import {
   currentLogContext,
@@ -116,6 +117,25 @@ export function buildAuditContext(
     messageText: messageText.text,
     messageTextTruncated: messageText.truncated,
     receivedAt: new Date(msg.createTime || Date.now()).toISOString(),
+  };
+}
+
+export function traceFieldsForAgentEvent(
+  event: AgentEvent,
+): AuditFields | null {
+  if (event.type !== 'tool_use' && event.type !== 'tool_result') return null;
+  const isGbrainMcp = event.toolType === 'mcp' && event.server === 'gbrain';
+  const suffix = event.type === 'tool_use' ? 'started' : 'completed';
+  return {
+    step_name: isGbrainMcp ? `gbrain.mcp_${suffix}` : `tool.${suffix}`,
+    step_type: event.toolType ?? 'tool',
+    item_id: event.itemId,
+    tool_server: event.server,
+    tool_name: event.tool,
+    request_json: event.toolInput,
+    output_text: event.type === 'tool_result' ? event.output : undefined,
+    status: event.error ? 'error' : event.status ?? 'success',
+    error: event.error,
   };
 }
 
