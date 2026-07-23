@@ -108,6 +108,10 @@ export class AppServerClient {
       const line = d.toString('utf8').trim();
       if (line) log.warn('agent', 'stderr', { line: line.slice(0, 200) });
     });
+    // write(..., callback) below owns per-request transport failures. Node also
+    // emits the same EPIPE on stdin; consume it so it cannot become an uncaught
+    // process error while the child 'exit' handler owns client-wide teardown.
+    child.stdin.on('error', () => undefined);
     child.on('exit', (code, signal) => {
       log.info('agent', 'exit', { pid: child.pid ?? null, code, signal });
       // Mark the client dead so later request()/notify() reject fast instead of

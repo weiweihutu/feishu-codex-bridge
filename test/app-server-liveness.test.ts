@@ -36,6 +36,21 @@ afterAll(() => {
 });
 
 describe.skipIf(process.platform === 'win32')('app-server 进程死亡自愈（QW-6）', () => {
+  it('stdin 传输错误有客户端级处理器，不能冒成未捕获异常', async () => {
+    const client = new AppServerClient({ bin, cwd: dir });
+    await client.connect();
+    try {
+      const child = (
+        client as unknown as {
+          child: { stdin: { listenerCount(event: string): number } };
+        }
+      ).child;
+      expect(child.stdin.listenerCount('error')).toBeGreaterThan(0);
+    } finally {
+      await client.close();
+    }
+  });
+
   it('exited flips on child death; pending request rejects, later requests fail fast', async () => {
     const client = new AppServerClient({ bin, cwd: dir });
     await client.connect();
