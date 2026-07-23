@@ -399,6 +399,8 @@ export interface QueuedTurn {
   summary?: string;
   /** Ordinary-message audit identity travels with the turn through the queue. */
   audit?: AuditContext;
+  /** `codex.prompt_built` is emitted once per ordinary turn, before agent intake. */
+  promptBuilt?: boolean;
   /** Completion dedupe is per executed turn, never shared by the whole run. */
   completionEmitted?: boolean;
 }
@@ -1222,6 +1224,20 @@ export function createOrchestrator(
     project: Project | undefined,
     perm: TurnPerm,
   ): Promise<void> {
+    return withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
+      handleTurnWithTrace(msg, text, sessionKey, flat, project, perm),
+    );
+  }
+
+  async function handleTurnWithTrace(
+    msg: NormalizedMessage,
+    text: string,
+    sessionKey: string,
+    flat: boolean,
+    project: Project | undefined,
+    perm: TurnPerm,
+  ): Promise<void> {
+    const messageTraceId = currentLogContext().traceId;
     // Mid-turn: steer (引导) or queue (排队).
     const existing = active.get(sessionKey);
     if (existing) {
@@ -1238,12 +1254,12 @@ export function createOrchestrator(
       const images = messageHasImages(msg) ? await collectInboundImages(channel, msg) : undefined;
       // Download file attachments too and weave their paths into the text (codex
       // reads them by path). Both awaits happen before re-reading the session.
-      const woven = await ingestContext(msg, text);
+      const ingested = await ingestContext(msg, text);
       // The turn may have finished while media downloaded — re-read the session.
       // If it's gone, start a fresh run (carrying what we already fetched).
       const cur = active.get(sessionKey);
       if (!cur) {
-        startReservedRun(msg, woven, sessionKey, flat, project, perm, images, true, text);
+        startReservedRun(msg, ingested, sessionKey, flat, project, perm, images, true, text, undefined, messageTraceId);
         return;
       }
       // A goal may have started while media downloaded — same prompt as above.
@@ -1251,10 +1267,34 @@ export function createOrchestrator(
         await replyGoalBusy(msg, flat);
         return;
       }
+      const woven = appendFeishuContext(ingested, msg);
+      let promptBuilt = false;
       if (getPendingPolicy(cfg) === 'steer' && cur.run && cur.thread) {
         const tid = cur.run.turnId();
         if (tid) {
           try {
+            const promptBuiltAt = Date.now();
+            emitTraceStep({
+              msg_id: msg.messageId,
+              trace_id: messageTraceId,
+              chat_id: msg.chatId,
+              thread_id: msg.threadId ?? null,
+              project: project?.name ?? '(unregistered)',
+              session_key: sessionKey,
+              session_id: cur.thread.sessionId,
+              step_name: 'codex.prompt_built',
+              step_type: 'context',
+              started_at: new Date(promptBuiltAt).toISOString(),
+              completed_at: new Date(promptBuiltAt).toISOString(),
+              elapsed_ms: 0,
+              input_text: woven,
+              request_json: {
+                promptChars: woven.length,
+                hasThreadId: Boolean(msg.threadId),
+                imageCount: images?.length ?? 0,
+              },
+            });
+            promptBuilt = true;
             await cur.thread.steer({ text: woven, images }, tid);
             log.info('intake', 'steer', { tid, images: images?.length ?? 0 });
             return;
@@ -1270,17 +1310,18 @@ export function createOrchestrator(
         summary: stripFileTokens(text).slice(0, 80) || undefined,
         audit: buildAuditContext(msg, text, {
           project: project?.name ?? '(unregistered)',
-          traceId: currentLogContext().traceId,
+          traceId: messageTraceId,
           images: images?.length ?? 0,
           imageFiles: images?.imageFiles ?? [],
           startedAt: new Date(msg.createTime || Date.now()).toISOString(),
         }),
+        promptBuilt,
       });
       log.info('intake', 'queued', { depth: cur.queue.length });
       return;
     }
 
-    startReservedRun(msg, text, sessionKey, flat, project, perm);
+    startReservedRun(msg, text, sessionKey, flat, project, perm, undefined, undefined, undefined, undefined, messageTraceId);
   }
 
   /** 🎯 goal 运行中收到消息的统一提示（goal 会话不入队，见 ActiveState.isGoal）。 */
@@ -1316,6 +1357,7 @@ export function createOrchestrator(
     preIngested?: boolean,
     summaryText?: string,
     goal?: boolean,
+    messageTraceId?: string,
   ): void {
     const existing = active.get(sessionKey);
     if (existing) {
@@ -1336,14 +1378,15 @@ export function createOrchestrator(
       // A run appeared between handleTurn's check and here (we awaited an image
       // download) — queue onto it rather than launch a second turn. `text` is
       // already file-woven when preIngested (handleTurn's fall-through).
+      const queuedText = preIngested && !goal ? appendFeishuContext(text, msg) : text;
       existing.queue.push({
-        input: { text, images: preloadedImages },
+        input: { text: queuedText, images: preloadedImages },
         requesterOpenId: msg.senderId,
         requestedAt: msg.createTime || Date.now(),
         summary: stripFileTokens(summaryText ?? text).slice(0, 80) || undefined,
         audit: buildAuditContext(msg, summaryText ?? text, {
           project: project?.name ?? '(unregistered)',
-          traceId: currentLogContext().traceId,
+          traceId: messageTraceId ?? currentLogContext().traceId,
           images: preloadedImages?.length ?? 0,
           imageFiles: preloadedImages?.imageFiles ?? [],
           startedAt: new Date(msg.createTime || Date.now()).toISOString(),
@@ -1354,7 +1397,7 @@ export function createOrchestrator(
     }
     const reserved: ActiveState = { queue: [], requesterOpenId: msg.senderId, isGoal: goal };
     active.set(sessionKey, reserved);
-    void withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
+    void withTrace({ chatId: msg.chatId, msgId: msg.messageId, traceId: messageTraceId }, async () => {
       // Goal runs use the OKR reaction (added at dispatch) as their only receipt,
       // not the ⏳/🫳 run-reaction lifecycle.
       const reaction = goal ? undefined : runReaction(msg.messageId, !sema.hasFree());
@@ -3878,6 +3921,7 @@ export function createOrchestrator(
       requestedAt: opts.requestedAt ?? Date.now(),
       summary: opts.summary,
       audit: opts.audit,
+      promptBuilt: true,
     };
     let currentTurnModel = opts.model;
     try {
@@ -3896,6 +3940,32 @@ export function createOrchestrator(
         const turnEffort = rec?.effort ?? opts.effort;
         currentTurnModel = turnModel;
         const modelDisp = getModelDisplay(cfg);
+        if (currentTurn.audit && !currentTurn.promptBuilt) {
+          const promptBuiltAt = Date.now();
+          const promptText = turnInput.text ?? '';
+          emitTraceStep({
+            msg_id: currentTurn.audit.msgId,
+            trace_id: currentTurn.audit.traceId,
+            chat_id: currentTurn.audit.chatId,
+            thread_id: currentTurn.audit.threadId ?? null,
+            project: currentTurn.audit.project,
+            session_key: topicThreadId ?? activeKey,
+            session_id: opts.thread.sessionId,
+            step_name: 'codex.prompt_built',
+            step_type: 'context',
+            started_at: new Date(promptBuiltAt).toISOString(),
+            completed_at: new Date(promptBuiltAt).toISOString(),
+            elapsed_ms: 0,
+            model: turnModel,
+            input_text: promptText,
+            request_json: {
+              promptChars: promptText.length,
+              hasThreadId: Boolean(currentTurn.audit.threadId),
+              imageCount: turnInput.images?.length ?? 0,
+            },
+          });
+          currentTurn.promptBuilt = true;
+        }
         const run = opts.thread.runStreamed(turnInput, { model: turnModel, effort: turnEffort });
         const turnStartAt = Date.now(); // turn/start 已在 runStreamed() 内发出（与下面的建卡并行）
         state.run = run;
@@ -4061,7 +4131,7 @@ export function createOrchestrator(
                 : null;
             emitTraceStep({
               msg_id: currentTurn.audit?.msgId,
-              trace_id: (currentTurn.audit?.traceId as string | undefined) ?? currentLogContext().traceId,
+              trace_id: currentTurn.audit?.traceId,
               chat_id: opts.chatId,
               thread_id: topicThreadId ?? null,
               project: currentTurn.audit?.project,

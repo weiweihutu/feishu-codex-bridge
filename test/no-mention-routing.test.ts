@@ -8,21 +8,33 @@ const routing = vi.hoisted(() => ({
   startThread: vi.fn(),
   listModels: vi.fn(),
   messageCompleted: vi.fn(),
+  traceStep: vi.fn(),
+  fail: vi.fn(),
   send: vi.fn(),
   createdCards: [] as string[],
   updatedCards: [] as string[],
   elementContents: [] as string[],
 }));
 
-vi.mock('../src/core/logger', () => ({
-  log: {
-    info: () => undefined,
-    warn: () => undefined,
-    fail: () => undefined,
-  },
-  currentLogContext: () => ({ traceId: 'trace_direct_topic' }),
-  withTrace: async (_ctx: unknown, fn: () => Promise<void> | void) => fn(),
-}));
+vi.mock('../src/core/logger', async () => {
+  const { AsyncLocalStorage } = await import('node:async_hooks');
+  const contexts = new AsyncLocalStorage<Record<string, string | undefined>>();
+  return {
+    log: {
+      info: () => undefined,
+      warn: () => undefined,
+      fail: routing.fail,
+    },
+    currentLogContext: () => ({ ...(contexts.getStore() ?? {}) }),
+    withTrace: <T>(
+      ctx: { traceId?: string; chatId?: string; msgId?: string },
+      fn: () => T,
+    ): T => contexts.run(
+      { ...ctx, traceId: ctx.traceId ?? `trace_${ctx.msgId ?? 'generated'}` },
+      fn,
+    ),
+  };
+});
 
 vi.mock('../src/project/registry', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/project/registry')>();
@@ -40,11 +52,23 @@ vi.mock('../src/project/announcement', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/bot/session-store', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/bot/session-store')>();
+  return {
+    ...original,
+    getSession: vi.fn(async () => undefined),
+    listSessions: vi.fn(async () => []),
+    patchSession: vi.fn(async () => undefined),
+    upsertSession: vi.fn(async () => undefined),
+  };
+});
+
 vi.mock('../src/core/audit-trace', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/core/audit-trace')>();
   return {
     ...original,
     emitMessageCompletedAudit: routing.messageCompleted,
+    emitTraceStep: routing.traceStep,
   };
 });
 
@@ -166,11 +190,49 @@ function ordinaryThread(events: AgentEvent[]): AgentThread {
   };
 }
 
+function queuedThread(
+  inputs: Array<{ text: string }>,
+  releaseFirst: Promise<void>,
+  onFirstEntered: () => void,
+  steeredInputs: Array<{ text: string }> = [],
+  steerError?: Error,
+): AgentThread {
+  let turn = 0;
+  return {
+    ...ordinaryThread([]),
+    steer: vi.fn(async (input) => {
+      steeredInputs.push({ text: input.text ?? '' });
+      if (steerError) throw steerError;
+    }),
+    runStreamed: (input) => {
+      inputs.push({ text: input.text ?? '' });
+      turn++;
+      const current = turn;
+      return {
+        events: (async function* () {
+          if (current === 1) {
+            onFirstEntered();
+            await releaseFirst;
+          }
+          yield { type: 'tool_use', itemId: `tool-${current}`, title: `tool ${current}` } as AgentEvent;
+          yield { type: 'tool_result', itemId: `tool-${current}`, output: `result ${current}` } as AgentEvent;
+          yield { type: 'text', itemId: `message-${current}`, text: `answer ${current}` } as AgentEvent;
+          yield { type: 'done', turnId: `turn-${current}` } as AgentEvent;
+        })(),
+        turnId: () => `turn-${current}`,
+        lastActivity: () => Date.now(),
+      };
+    },
+  };
+}
+
 describe('createOrchestrator no-mention routing', () => {
   const orchestrators: Orchestrator[] = [];
 
   beforeEach(() => {
     routing.project = undefined;
+    cfg.preferences ??= {};
+    cfg.preferences.pendingPolicy = undefined;
     routing.startThread.mockReset().mockRejectedValue(new Error('stop at direct-topic boundary'));
     routing.listModels.mockReset().mockResolvedValue([{
       id: 'gpt-test',
@@ -181,6 +243,8 @@ describe('createOrchestrator no-mention routing', () => {
       defaultEffort: 'medium',
     }]);
     routing.messageCompleted.mockReset();
+    routing.traceStep.mockReset();
+    routing.fail.mockReset();
     routing.send.mockReset().mockResolvedValue({ messageId: 'om_error' });
     routing.createdCards.length = 0;
     routing.updatedCards.length = 0;
@@ -229,6 +293,201 @@ describe('createOrchestrator no-mention routing', () => {
     }
     expect(routing.updatedCards.at(-1)).toContain('final answer');
   });
+
+  it('queues a running-session message with its own Feishu context and trace identity', async () => {
+    routing.project = project(true);
+    cfg.preferences!.pendingPolicy = 'queue';
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      markFirstEntered = resolve;
+    });
+    const inputs: Array<{ text: string }> = [];
+    routing.startThread.mockResolvedValue(queuedThread(inputs, firstBlocked, markFirstEntered));
+    const orchestrator = create();
+    const threadId = `omt_queue_trace_${Date.now()}`;
+
+    await orchestrator.onMessage(message({
+      messageId: 'om_first',
+      threadId,
+      content: 'first request',
+      senderId: 'ou_first',
+      senderName: 'First User',
+    }));
+    await vi.waitFor(() => expect(routing.startThread).toHaveBeenCalledTimes(1));
+    await firstEntered;
+
+    await orchestrator.onMessage(message({
+      messageId: 'om_second',
+      threadId,
+      content: 'second request',
+      senderId: 'ou_second',
+      senderName: 'Second User',
+      createTime: 2,
+    }));
+    releaseFirst();
+
+    await vi.waitFor(() => expect(inputs).toHaveLength(2), { timeout: 5_000 });
+    await vi.waitFor(() => expect(
+      routing.messageCompleted.mock.calls.some(([ctx]) => ctx.msgId === 'om_second'),
+    ).toBe(true), { timeout: 5_000 });
+
+    expect(inputs[1]?.text).toContain('second request');
+    expect(inputs[1]?.text).toContain('[Feishu Context]');
+    expect(inputs[1]?.text).toContain('message_id=om_second');
+    expect(inputs[1]?.text).toContain('feishu_user_id=ou_second');
+    expect(inputs[1]?.text).toContain('REQUEST_ID to message_id');
+    expect(inputs[1]?.text).not.toContain('message_id=om_first');
+    expect(inputs[1]?.text).not.toContain('feishu_user_id=ou_first');
+
+    const promptSteps = routing.traceStep.mock.calls
+      .map(([step]) => step)
+      .filter((step) => step.step_name === 'codex.prompt_built');
+    expect(promptSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ msg_id: 'om_first', trace_id: 'trace_om_first' }),
+      expect.objectContaining({
+        msg_id: 'om_second',
+        trace_id: 'trace_om_second',
+        session_id: 'session_run',
+        input_text: expect.stringContaining('message_id=om_second'),
+      }),
+    ]));
+    expect(promptSteps.filter((step) => step.msg_id === 'om_second')).toHaveLength(1);
+
+    const secondToolSteps = routing.traceStep.mock.calls
+      .map(([step]) => step)
+      .filter((step) => step.msg_id === 'om_second' && String(step.step_name).startsWith('tool.'));
+    expect(secondToolSteps.length).toBeGreaterThan(0);
+    expect(secondToolSteps.every((step) => step.trace_id === 'trace_om_second')).toBe(true);
+    expect(routing.messageCompleted).toHaveBeenCalledWith(
+      expect.objectContaining({ msgId: 'om_second', traceId: 'trace_om_second' }),
+      expect.objectContaining({ msgId: 'om_second', traceId: 'trace_om_second' }),
+    );
+  }, 10_000);
+
+  it('steers a running-session message with its own Feishu context and prompt trace', async () => {
+    routing.project = project(true);
+    cfg.preferences!.pendingPolicy = 'steer';
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      markFirstEntered = resolve;
+    });
+    const inputs: Array<{ text: string }> = [];
+    const steeredInputs: Array<{ text: string }> = [];
+    routing.startThread.mockResolvedValue(
+      queuedThread(inputs, firstBlocked, markFirstEntered, steeredInputs),
+    );
+    const orchestrator = create();
+    const threadId = `omt_steer_trace_${Date.now()}`;
+
+    await orchestrator.onMessage(message({
+      messageId: 'om_steer_first',
+      threadId,
+      content: 'first request',
+      senderId: 'ou_first',
+      senderName: 'First User',
+    }));
+    await firstEntered;
+
+    await orchestrator.onMessage(message({
+      messageId: 'om_steer_second',
+      threadId,
+      content: 'steer request',
+      senderId: 'ou_second',
+      senderName: 'Second User',
+      createTime: 2,
+    }));
+
+    expect(steeredInputs).toHaveLength(1);
+    expect(steeredInputs[0]?.text).toContain('steer request');
+    expect(steeredInputs[0]?.text).toContain('message_id=om_steer_second');
+    expect(steeredInputs[0]?.text).toContain('feishu_user_id=ou_second');
+    expect(steeredInputs[0]?.text).toContain('REQUEST_ID to message_id');
+    expect(steeredInputs[0]?.text).not.toContain('message_id=om_steer_first');
+
+    const promptSteps = routing.traceStep.mock.calls
+      .map(([step]) => step)
+      .filter((step) => step.msg_id === 'om_steer_second' && step.step_name === 'codex.prompt_built');
+    expect(promptSteps).toEqual([
+      expect.objectContaining({
+        trace_id: 'trace_om_steer_second',
+        session_id: 'session_run',
+        input_text: expect.stringContaining('message_id=om_steer_second'),
+      }),
+    ]);
+
+    releaseFirst();
+    await vi.waitFor(() => expect(
+      routing.messageCompleted.mock.calls.some(([ctx]) => ctx.msgId === 'om_steer_first'),
+    ).toBe(true));
+  }, 10_000);
+
+  it('emits one prompt trace when failed steer falls back to the real queue', async () => {
+    routing.project = project(true);
+    cfg.preferences!.pendingPolicy = 'steer';
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      markFirstEntered = resolve;
+    });
+    const inputs: Array<{ text: string }> = [];
+    const steeredInputs: Array<{ text: string }> = [];
+    routing.startThread.mockResolvedValue(
+      queuedThread(inputs, firstBlocked, markFirstEntered, steeredInputs, new Error('steer failed')),
+    );
+    const orchestrator = create();
+    const threadId = `omt_steer_fallback_${Date.now()}`;
+
+    await orchestrator.onMessage(message({
+      messageId: 'om_fallback_first',
+      threadId,
+      content: 'first request',
+      senderId: 'ou_first',
+      senderName: 'First User',
+    }));
+    await firstEntered;
+
+    await orchestrator.onMessage(message({
+      messageId: 'om_fallback_second',
+      threadId,
+      content: 'fallback request',
+      senderId: 'ou_second',
+      senderName: 'Second User',
+      createTime: 2,
+    }));
+    releaseFirst();
+
+    await vi.waitFor(() => expect(inputs).toHaveLength(2), { timeout: 5_000 });
+    await vi.waitFor(() => expect(
+      routing.messageCompleted.mock.calls.some(([ctx]) => ctx.msgId === 'om_fallback_second'),
+    ).toBe(true), { timeout: 5_000 });
+
+    expect(steeredInputs[0]?.text).toContain('message_id=om_fallback_second');
+    expect(inputs[1]?.text).toContain('message_id=om_fallback_second');
+    const promptSteps = routing.traceStep.mock.calls
+      .map(([step]) => step)
+      .filter((step) =>
+        step.msg_id === 'om_fallback_second'
+        && step.step_name === 'codex.prompt_built'
+      );
+    expect(promptSteps).toEqual([
+      expect.objectContaining({
+        trace_id: 'trace_om_fallback_second',
+        session_id: 'session_run',
+        input_text: expect.stringContaining('message_id=om_fallback_second'),
+      }),
+    ]);
+  }, 10_000);
 
   it('audits a direct-topic intake failure once with the model known before startThread fails', async () => {
     routing.project = project(true);
