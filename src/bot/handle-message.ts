@@ -99,6 +99,7 @@ import {
   buildContextCard,
 } from '../card/context-gauge';
 import { log, withTrace } from '../core/logger';
+import { shouldRespondWithoutMention } from './feishu-message-policy';
 import {
   buildAddAdminCard,
   buildAddAllowedCard,
@@ -832,9 +833,22 @@ export function createOrchestrator(
     }
 
     const project = await getProjectByChatId(msg.chatId);
-    // @门：没 @ 时只在「项目群 + 免@ 适用」才响应。免@默认开,但 multi 仅话题内、
-    // single 整群;非项目群一律不响应非 @ 消息。
-    if (!msg.mentionedBot && !(project && shouldRespondWithoutMention(project, msg))) return;
+    // @门：没 @ 时只在「项目群 + effective 免@ 开启」才响应；@all 或定向给
+    // 其他真人的消息仍不插话。非项目群一律不响应非 @ 消息。
+    if (
+      !msg.mentionedBot &&
+      !(
+        project &&
+        shouldRespondWithoutMention(
+          {
+            kind: project.kind,
+            noMention: project.noMention,
+            defaultNoMention: defaultNoMention(project),
+          },
+          msg,
+        )
+      )
+    ) return;
     if (!isChatAllowed(cfg, msg.chatId) || !isUserAllowedInProject(cfg, project, msg.senderId)) {
       log.info('intake', 'reject', { reason: 'not_allowed', chatId: msg.chatId.slice(-6) });
       return;
@@ -1046,21 +1060,6 @@ export function createOrchestrator(
       name === 'clear'
       ? name
       : null;
-  }
-
-  /** Whether to respond to a non-@ message in a project group (免@ default on).
-   * single: whole group. multi: inside a topic, OR a slash command in the main
-   * area — plain chatter in the main area still needs @ (开新话题 是明确意图，
-   * 不能让随便一句话就开话题)，but explicit commands (/help /resume /settings
-   * /model) and a `/goal` trigger respond without @ since they're unambiguous intent.
-   * 即使开了免@，若消息 @了所有人 或 @了具体的(非机器人)用户,说明是定向给别人的,
-   * bot 不插话。(此函数仅在 !mentionedBot 时调用,故 @到 bot 的情况已被排除。) */
-  function shouldRespondWithoutMention(project: Project, msg: NormalizedMessage): boolean {
-    if (!(project.noMention ?? defaultNoMention(project))) return false;
-    if (msg.mentionAll || msg.mentions.some((m) => !m.isBot)) return false;
-    if ((project.kind ?? 'multi') === 'single') return true;
-    const content = msg.content.trim();
-    return Boolean(msg.threadId) || parseCommand(content) !== null || parseGoalTrigger(content) !== null;
   }
 
   /** 非管理员触发 owner-only 命令(/resume、/settings)时的统一无权限提示。
