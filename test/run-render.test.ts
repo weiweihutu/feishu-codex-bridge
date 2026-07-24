@@ -276,8 +276,8 @@ describe('buildRunCard', () => {
     const resolve = buttons(card).find((b) => b.a === RR.resolve);
 
     expect(resolve).toMatchObject({
-      label: "<font color='green'>✓</font>已解决",
-      textTag: 'lark_md',
+      label: '✅已解决',
+      textTag: 'plain_text',
       m: 'om_question',
     });
     expect(JSON.stringify(card)).toContain('"flex_mode":"none"');
@@ -313,9 +313,9 @@ describe('buildRunCard', () => {
         resolved: true,
       },
     });
-    const status = buttons(card).find((b) => b.label === "<font color='green'>✓</font>已解决");
+    const status = buttons(card).find((b) => b.label === '✅已解决');
 
-    expect(status).toMatchObject({ textTag: 'lark_md', a: undefined, m: undefined });
+    expect(status).toMatchObject({ textTag: 'plain_text', a: undefined, m: undefined });
     expect(JSON.stringify(card)).toContain('"disabled":true');
   });
 

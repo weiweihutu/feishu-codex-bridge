@@ -44,7 +44,7 @@ export const RR = {
   resolve: 'reply.resolve',
 } as const;
 
-const RESOLVED_BUTTON_TEXT = "<font color='green'>✓</font>已解决";
+const RESOLVED_BUTTON_TEXT = '✅已解决';
 
 export interface ReplyReviewState {
   /** Inbound user-message id; first-turn reviews associate through this field. */
@@ -58,7 +58,7 @@ export interface ReplyReviewState {
 function resolvedButton(review: ReplyReviewState): CardElement {
   return {
     tag: 'button',
-    text: { tag: 'lark_md', content: RESOLVED_BUTTON_TEXT },
+    text: { tag: 'plain_text', content: RESOLVED_BUTTON_TEXT },
     type: 'primary',
     ...(review.resolved
       ? { disabled: true }
