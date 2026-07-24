@@ -69,7 +69,7 @@ function resolvedButton(review: ReplyReviewState): CardElement {
               value: {
                 a: RR.resolve,
                 m: review.msgId,
-                t: review.threadId,
+                ...(review.threadId ? { t: review.threadId } : {}),
                 o: review.requesterId,
               },
             },
