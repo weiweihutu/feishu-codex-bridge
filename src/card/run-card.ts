@@ -44,6 +44,7 @@ export const RR = {
 } as const;
 
 const RESOLVED_BUTTON_TEXT = '✅已解决';
+const REVIEW_ACTION_EID = 'review_action';
 
 export interface ReplyReviewState {
   /** Inbound user-message id; first-turn reviews associate through this field. */
@@ -277,7 +278,7 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
     if (controls.length > 0) elements.push(actions(controls, CONTROLS_EID));
   }
   if (rc.review) {
-    elements.push(actions([resolvedButton({ ...rc.review, resolved: true })], 'review-action'));
+    elements.push(actions([resolvedButton({ ...rc.review, resolved: true })], REVIEW_ACTION_EID));
   }
 
   return elements;
@@ -342,7 +343,7 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   const mEl = rc.modelOnTerminal ? modelEl(rc) : null;
   if (mEl) elements.push(mEl);
   if (state.terminal === 'done' && answer && rc.review) {
-    elements.push(actions([resolvedButton(rc.review)], 'review-action'));
+    elements.push(actions([resolvedButton(rc.review)], REVIEW_ACTION_EID));
   }
 
   return elements;

@@ -284,6 +284,8 @@ describe('buildRunCard', () => {
     expect(JSON.stringify(card)).not.toContain('"horizontal_align":"right"');
     expect(JSON.stringify(card)).not.toContain('"elements":[]');
     expect(JSON.stringify(card)).not.toContain('"t":null');
+    expect(JSON.stringify(card)).toContain('"element_id":"review_action"');
+    expect(elementIds(card).every((id) => /^[A-Za-z][A-Za-z0-9_]*$/.test(id))).toBe(true);
 
     expect(
       buttons(buildRunCard({ rs: run([{ type: 'done', turnId: 'turn-1' }]), review })).find(
@@ -379,6 +381,16 @@ function buttons(
       acc.push({ label: o.text?.content, textTag: o.text?.tag, a: value.a, m: value.m });
     }
     for (const k of Object.keys(o)) buttons(o[k], acc);
+  }
+  return acc;
+}
+
+function elementIds(node: unknown, acc: string[] = []): string[] {
+  if (Array.isArray(node)) node.forEach((n) => elementIds(n, acc));
+  else if (node && typeof node === 'object') {
+    const o = node as Record<string, unknown>;
+    if (typeof o.element_id === 'string') acc.push(o.element_id);
+    for (const value of Object.values(o)) elementIds(value, acc);
   }
   return acc;
 }
