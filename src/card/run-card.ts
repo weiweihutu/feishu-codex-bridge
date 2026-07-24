@@ -445,6 +445,11 @@ export function buildRunCardPlain(rc: RunCardState): CardObject {
   return buildRunCard({ ...rc, cardKey: undefined });
 }
 
+/** Terminal frame used to clear streaming state before adding review controls. */
+export function buildRunCardWithoutReview(rc: RunCardState): CardObject {
+  return buildRunCard({ ...rc, review: undefined });
+}
+
 /** Render inputs for the queue placeholder card (M-3 排队可见可取消). */
 export interface QueuedCardState {
   /** 1-based position in the global run queue (waiting layout only). */
