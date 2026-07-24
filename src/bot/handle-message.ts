@@ -87,7 +87,7 @@ import {
   buildQueuedCard,
   buildRunCard,
   buildRunCardPlain,
-  buildRunCardWithoutReview,
+  buildRunCardWithDisabledReview,
   CONTROLS_EID,
   RC,
   RR,
@@ -4767,10 +4767,11 @@ export function createOrchestrator(
         // finalizeCard, while callbacks arriving from now on cannot overwrite it.
         const manuallyRequested = Boolean(state.completionReminderRequested);
         completionReminderRefreshers.delete(cardMsgId);
-        const terminalCardUpdated = await stream.finalizeCard(channel, buildRunCardWithoutReview(rc));
+        const terminalCardUpdated = await stream.finalizeCard(channel, buildRunCardWithDisabledReview(rc));
         if (terminalCardUpdated && rc.review) {
+          await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
           const reviewCardUpdated = await stream.updateCard(channel, buildRunCard(rc));
-          log.info('card', 'review-action-update', { updated: reviewCardUpdated });
+          log.info('card', 'review-action-update', { updated: reviewCardUpdated, waitedMs: CARD_SETTLE_MS });
         }
         // One-line per-turn timeline; all ms are relative to the turn's stream start.
         {

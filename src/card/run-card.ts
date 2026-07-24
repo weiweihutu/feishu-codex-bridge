@@ -1,5 +1,4 @@
 import {
-  actionRight,
   actions,
   button,
   card,
@@ -277,6 +276,9 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
     }
     if (controls.length > 0) elements.push(actions(controls, CONTROLS_EID));
   }
+  if (rc.review) {
+    elements.push(actions([resolvedButton({ ...rc.review, resolved: true })], 'review-action'));
+  }
 
   return elements;
 }
@@ -340,7 +342,7 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   const mEl = rc.modelOnTerminal ? modelEl(rc) : null;
   if (mEl) elements.push(mEl);
   if (state.terminal === 'done' && answer && rc.review) {
-    elements.push(actionRight(resolvedButton(rc.review), 'review-action'));
+    elements.push(actions([resolvedButton(rc.review)], 'review-action'));
   }
 
   return elements;
@@ -445,9 +447,12 @@ export function buildRunCardPlain(rc: RunCardState): CardObject {
   return buildRunCard({ ...rc, cardKey: undefined });
 }
 
-/** Terminal frame used to clear streaming state before adding review controls. */
-export function buildRunCardWithoutReview(rc: RunCardState): CardObject {
-  return buildRunCard({ ...rc, review: undefined });
+/** Terminal frame that preserves the existing review control but keeps it disabled. */
+export function buildRunCardWithDisabledReview(rc: RunCardState): CardObject {
+  return buildRunCard({
+    ...rc,
+    review: rc.review ? { ...rc.review, resolved: true } : undefined,
+  });
 }
 
 /** Render inputs for the queue placeholder card (M-3 排队可见可取消). */

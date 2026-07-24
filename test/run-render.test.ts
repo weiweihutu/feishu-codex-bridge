@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mapNotification } from '../src/agent/codex-appserver/event-map';
 import type { ServerNotification, ThreadItem } from '../src/agent/codex-appserver/protocol';
 import type { AgentEvent } from '../src/agent/types';
-import { buildRunCard, buildRunCardWithoutReview, RC, RR } from '../src/card/run-card';
+import { buildRunCard, buildRunCardWithDisabledReview, RC, RR } from '../src/card/run-card';
 import {
   initialState,
   markIdleTimeout,
@@ -261,7 +261,7 @@ describe('buildRunCard', () => {
     expect(json).not.toMatch(/1 个工具(?:调用)?/);
   });
 
-  it('renders a right-aligned requester review action only for a successful answer', () => {
+  it('renders a requester review action only for a successful answer', () => {
     const review = {
       msgId: 'om_question',
       threadId: null,
@@ -280,8 +280,8 @@ describe('buildRunCard', () => {
       textTag: 'plain_text',
       m: 'om_question',
     });
-    expect(JSON.stringify(card)).toContain('"flex_mode":"none"');
-    expect(JSON.stringify(card)).toContain('"horizontal_align":"right"');
+    expect(JSON.stringify(card)).toContain('"flex_mode":"flow"');
+    expect(JSON.stringify(card)).not.toContain('"horizontal_align":"right"');
     expect(JSON.stringify(card)).not.toContain('"elements":[]');
     expect(JSON.stringify(card)).not.toContain('"t":null');
 
@@ -303,6 +303,23 @@ describe('buildRunCard', () => {
     ).toBeUndefined();
   });
 
+  it('keeps a disabled review placeholder on the running card', () => {
+    const card = buildRunCard({
+      rs: run([{ type: 'text_delta', itemId: 'a', delta: 'working' }]),
+      cardKey: 'om_card',
+      review: {
+        msgId: 'om_question',
+        threadId: null,
+        requesterId: 'ou_requester',
+        resolved: false,
+      },
+    });
+    const placeholder = buttons(card).find((b) => b.label === '✅已解决');
+
+    expect(placeholder).toMatchObject({ textTag: 'plain_text', a: undefined, m: undefined });
+    expect(JSON.stringify(card)).toContain('"disabled":true');
+  });
+
   it('replaces the review action with a disabled adopted status after resolution', () => {
     const card = buildRunCard({
       rs: run([
@@ -322,8 +339,8 @@ describe('buildRunCard', () => {
     expect(JSON.stringify(card)).toContain('"disabled":true');
   });
 
-  it('builds a terminal frame without review controls before adding the review action', () => {
-    const card = buildRunCardWithoutReview({
+  it('builds a terminal frame with the existing review control disabled', () => {
+    const card = buildRunCardWithDisabledReview({
       rs: run([
         { type: 'text', itemId: 'a', text: 'final answer' },
         { type: 'done', turnId: 'turn-1' },
@@ -338,7 +355,13 @@ describe('buildRunCard', () => {
     });
 
     expect(JSON.stringify(card)).toContain('"content":"final answer"');
-    expect(buttons(card)).toHaveLength(0);
+    expect(buttons(card)).toContainEqual({
+      label: '✅已解决',
+      textTag: 'plain_text',
+      a: undefined,
+      m: undefined,
+    });
+    expect(JSON.stringify(card)).toContain('"disabled":true');
   });
 
 });
