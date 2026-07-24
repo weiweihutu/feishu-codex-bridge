@@ -89,6 +89,8 @@ import {
   buildRunCardPlain,
   CONTROLS_EID,
   RC,
+  RR,
+  type ReplyReviewState,
   type RunCardState,
 } from '../card/run-card';
 import { buildGoalDoneCard } from '../card/goal-card';
@@ -442,6 +444,28 @@ export function activateQueuedTurn(
 
 /** Only the exact turn initiator may opt that turn into the manual reminder. */
 export function isCompletionReminderRequester(operatorOpenId?: string, requesterOpenId?: string): boolean {
+  return Boolean(operatorOpenId && requesterOpenId && operatorOpenId === requesterOpenId);
+}
+
+/** Build review routing from the inbound audit identity, never the discovered topic id. */
+export function buildReplyReview(
+  audit: Pick<AuditContext, 'msgId' | 'threadId' | 'senderId'> | undefined,
+  requesterOpenId?: string,
+): ReplyReviewState | undefined {
+  const msgId = typeof audit?.msgId === 'string' ? audit.msgId : '';
+  const requesterId =
+    typeof audit?.senderId === 'string' && audit.senderId ? audit.senderId : (requesterOpenId ?? '');
+  if (!msgId || !requesterId) return undefined;
+  return {
+    msgId,
+    threadId: typeof audit?.threadId === 'string' && audit.threadId ? audit.threadId : null,
+    requesterId,
+    resolved: false,
+  };
+}
+
+/** Review actions deliberately have no administrator override. */
+export function canResolveReply(operatorOpenId?: string, requesterOpenId?: string): boolean {
   return Boolean(operatorOpenId && requesterOpenId && operatorOpenId === requesterOpenId);
 }
 
@@ -841,6 +865,8 @@ export function createOrchestrator(
   /** CardKit entity backing each run card, by messageId — drives the native
    * typewriter stream and whole-card (button/settings) updates. */
   const runStreams = new Map<string, RunCardStream>();
+  /** Terminal reply cards retained separately because run-card promotion evicts older turns. */
+  const reviewCards = new Map<string, { rc: RunCardState; stream: RunCardStream }>();
   /** Live manual-reminder card repaint, keyed like runsByCard. The closure is
    * swapped when a queue placeholder flips into a run card, so a double click
    * can only mutate the one current turn and never an older/future card. */
@@ -2420,6 +2446,43 @@ export function createOrchestrator(
   }
 
   dispatcher
+    .on(RR.resolve, async ({ evt, value }) => {
+      const review = {
+        msgId: typeof value.m === 'string' ? value.m : '',
+        threadId: typeof value.t === 'string' && value.t ? value.t : null,
+        requesterId: typeof value.o === 'string' ? value.o : '',
+      };
+      const operatorId = evt.operator?.openId ?? '';
+      if (!runAllowed(evt) || !review.msgId || !review.requesterId) return;
+      if (!canResolveReply(operatorId, review.requesterId)) {
+        log.info('card', 'action-denied', { actionId: RR.resolve, reason: 'not-requester' });
+        await channel
+          .send(
+            evt.chatId,
+            { markdown: '⚠️ 仅问题发起人可以标记已解决。' },
+            { replyTo: evt.messageId, replyInThread: true },
+          )
+          .catch(() => undefined);
+        return;
+      }
+      const stored = reviewCards.get(evt.messageId);
+      if (stored?.rc.review?.resolved) return;
+      const operatedAt = new Date().toISOString();
+      withTrace({ chatId: evt.chatId, msgId: review.msgId }, () => {
+        log.info('audit', 'reply_reviewed', {
+          action: 'resolved',
+          threadId: review.threadId,
+          cardMsgId: evt.messageId,
+          requesterId: review.requesterId,
+          operatorId,
+          operatedAt,
+        });
+      });
+      if (stored?.rc.review) {
+        stored.rc.review.resolved = true;
+        await stored.stream.updateCard(channel, buildRunCard(stored.rc));
+      }
+    })
     .on(MC.model, ({ evt, option }) => {
       const state = authPending(modelPending, evt);
       if (!state || !option) return;
@@ -4445,6 +4508,7 @@ export function createOrchestrator(
         const rc: RunCardState = {
           rs: render.snapshot(),
           requesterOpenId: currentTurn.requesterOpenId,
+          review: buildReplyReview(currentTurn.audit, currentTurn.requesterOpenId),
           showTools: false,
           completionReminder: completionReminderView(state),
           // 模型显示档位：footnote 本轮 model·推理强度；always 档终态卡也保留。
@@ -4729,6 +4793,13 @@ export function createOrchestrator(
           intake = undefined; // 排队续轮没有入站段，别把首轮数值带下去
         }
         runsByCard.delete(cardMsgId);
+        if (rc.review) {
+          reviewCards.set(finalMsgId, { rc, stream });
+          if (reviewCards.size > 2048) {
+            const oldest = reviewCards.keys().next().value;
+            if (oldest) reviewCards.delete(oldest);
+          }
+        }
         promoteCard(finalMsgId, rc);
 
         for (const fence of fences) {

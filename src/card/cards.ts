@@ -265,6 +265,20 @@ export function splitRow(left: CardElement, right: CardElement, elementId?: stri
   };
 }
 
+/** Pin one action to the right edge without introducing an empty visible component. */
+export function actionRight(item: CardElement, elementId?: string): CardElement {
+  return {
+    tag: 'column_set',
+    ...(elementId ? { element_id: elementId } : {}),
+    flex_mode: 'none',
+    horizontal_spacing: 'small',
+    columns: [
+      { tag: 'column', width: 'weighted', weight: 1, elements: [] },
+      { tag: 'column', width: 'auto', vertical_align: 'center', elements: [item] },
+    ],
+  };
+}
+
 export type ButtonType = 'default' | 'primary' | 'danger';
 
 export function button(label: string, value: ActionValue, type: ButtonType = 'default'): CardElement {
@@ -273,6 +287,16 @@ export function button(label: string, value: ActionValue, type: ButtonType = 'de
     text: { tag: 'plain_text', content: label },
     type,
     behaviors: [{ type: 'callback', value }],
+  };
+}
+
+/** Disabled terminal status using the same visual weight as the action it replaces. */
+export function statusButton(label: string, type: ButtonType = 'primary'): CardElement {
+  return {
+    tag: 'button',
+    text: { tag: 'plain_text', content: label },
+    type,
+    disabled: true,
   };
 }
 

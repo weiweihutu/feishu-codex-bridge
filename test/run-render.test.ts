@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mapNotification } from '../src/agent/codex-appserver/event-map';
 import type { ServerNotification, ThreadItem } from '../src/agent/codex-appserver/protocol';
 import type { AgentEvent } from '../src/agent/types';
-import { buildRunCard, RC } from '../src/card/run-card';
+import { buildRunCard, RC, RR } from '../src/card/run-card';
 import {
   initialState,
   markIdleTimeout,
@@ -261,16 +261,77 @@ describe('buildRunCard', () => {
     expect(json).not.toMatch(/1 个工具(?:调用)?/);
   });
 
+  it('renders a right-aligned requester review action only for a successful answer', () => {
+    const review = {
+      msgId: 'om_question',
+      threadId: null,
+      requesterId: 'ou_requester',
+      resolved: false,
+    };
+    const doneWithAnswer = run([
+      { type: 'text', itemId: 'a', text: 'final answer' },
+      { type: 'done', turnId: 'turn-1' },
+    ]);
+    const card = buildRunCard({ rs: doneWithAnswer, review });
+    const resolve = buttons(card).find((b) => b.a === RR.resolve);
+
+    expect(resolve).toMatchObject({
+      label: "<font color='green'>✓</font>已解决",
+      textTag: 'lark_md',
+      m: 'om_question',
+    });
+    expect(JSON.stringify(card)).toContain('"flex_mode":"none"');
+
+    expect(
+      buttons(buildRunCard({ rs: run([{ type: 'done', turnId: 'turn-1' }]), review })).find(
+        (b) => b.a === RR.resolve,
+      ),
+    ).toBeUndefined();
+    expect(
+      buttons(
+        buildRunCard({
+          rs: run([
+            { type: 'text', itemId: 'a', text: 'partial' },
+            { type: 'error', message: 'boom', willRetry: false },
+          ]),
+          review,
+        }),
+      ).find((b) => b.a === RR.resolve),
+    ).toBeUndefined();
+  });
+
+  it('replaces the review action with a disabled adopted status after resolution', () => {
+    const card = buildRunCard({
+      rs: run([
+        { type: 'text', itemId: 'a', text: 'final answer' },
+        { type: 'done', turnId: 'turn-1' },
+      ]),
+      review: {
+        msgId: 'om_question',
+        threadId: 'omt_topic',
+        requesterId: 'ou_requester',
+        resolved: true,
+      },
+    });
+    const status = buttons(card).find((b) => b.label === "<font color='green'>✓</font>已解决");
+
+    expect(status).toMatchObject({ textTag: 'lark_md', a: undefined, m: undefined });
+    expect(JSON.stringify(card)).toContain('"disabled":true');
+  });
+
 });
 
 /** Collect every button's {label, action, msgId} from a built card. */
-function buttons(node: unknown, acc: { label: string; a: unknown; m: unknown }[] = []): { label: string; a: unknown; m: unknown }[] {
+function buttons(
+  node: unknown,
+  acc: { label: string; textTag: unknown; a: unknown; m: unknown }[] = [],
+): { label: string; textTag: unknown; a: unknown; m: unknown }[] {
   if (Array.isArray(node)) node.forEach((n) => buttons(n, acc));
   else if (node && typeof node === 'object') {
     const o = node as Record<string, any>;
     if (o.tag === 'button') {
       const value = o.behaviors?.[0]?.value ?? {};
-      acc.push({ label: o.text?.content, a: value.a, m: value.m });
+      acc.push({ label: o.text?.content, textTag: o.text?.tag, a: value.a, m: value.m });
     }
     for (const k of Object.keys(o)) buttons(o[k], acc);
   }

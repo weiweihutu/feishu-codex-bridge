@@ -1,4 +1,5 @@
 import {
+  actionRight,
   actions,
   button,
   card,
@@ -37,6 +38,45 @@ export const RC = {
   /** goal-only: clear the goal but let the in-flight turn finish (no auto-continue). */
   endGoal: 'goal.end',
 } as const;
+
+/** Action ids for requester review of a completed reply. */
+export const RR = {
+  resolve: 'reply.resolve',
+} as const;
+
+const RESOLVED_BUTTON_TEXT = "<font color='green'>✓</font>已解决";
+
+export interface ReplyReviewState {
+  /** Inbound user-message id; first-turn reviews associate through this field. */
+  msgId: string;
+  /** Inbound thread id; null on the first message that creates a topic. */
+  threadId: string | null;
+  requesterId: string;
+  resolved: boolean;
+}
+
+function resolvedButton(review: ReplyReviewState): CardElement {
+  return {
+    tag: 'button',
+    text: { tag: 'lark_md', content: RESOLVED_BUTTON_TEXT },
+    type: 'primary',
+    ...(review.resolved
+      ? { disabled: true }
+      : {
+          behaviors: [
+            {
+              type: 'callback',
+              value: {
+                a: RR.resolve,
+                m: review.msgId,
+                t: review.threadId,
+                o: review.requesterId,
+              },
+            },
+          ],
+        }),
+  };
+}
 
 /**
  * Stable element_id of the streamed answer markdown while RUNNING. The answer
@@ -122,6 +162,8 @@ export interface RunCardState {
   /** `![](src) → image_key` for the final answer's images (populated at terminal
    * after upload; absent while streaming, so refs show as text until then). */
   images?: ReadonlyMap<string, string>;
+  /** Requester-only accuracy review action for a successful ordinary reply. */
+  review?: ReplyReviewState;
 }
 
 /**
@@ -297,6 +339,9 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   // on the terminal card; running(仅输出时) drops it once the turn ends.
   const mEl = rc.modelOnTerminal ? modelEl(rc) : null;
   if (mEl) elements.push(mEl);
+  if (state.terminal === 'done' && answer && rc.review) {
+    elements.push(actionRight(resolvedButton(rc.review), 'review-action'));
+  }
 
   return elements;
 }
