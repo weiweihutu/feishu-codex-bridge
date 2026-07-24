@@ -271,10 +271,15 @@ export function actionRight(item: CardElement, elementId?: string): CardElement 
     tag: 'column_set',
     ...(elementId ? { element_id: elementId } : {}),
     flex_mode: 'none',
-    horizontal_spacing: 'small',
     columns: [
-      { tag: 'column', width: 'weighted', weight: 1, elements: [] },
-      { tag: 'column', width: 'auto', vertical_align: 'center', elements: [item] },
+      {
+        tag: 'column',
+        width: 'weighted',
+        weight: 1,
+        horizontal_align: 'right',
+        vertical_align: 'center',
+        elements: [item],
+      },
     ],
   };
 }

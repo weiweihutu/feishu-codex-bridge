@@ -281,6 +281,8 @@ describe('buildRunCard', () => {
       m: 'om_question',
     });
     expect(JSON.stringify(card)).toContain('"flex_mode":"none"');
+    expect(JSON.stringify(card)).toContain('"horizontal_align":"right"');
+    expect(JSON.stringify(card)).not.toContain('"elements":[]');
 
     expect(
       buttons(buildRunCard({ rs: run([{ type: 'done', turnId: 'turn-1' }]), review })).find(
