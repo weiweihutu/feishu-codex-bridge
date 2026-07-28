@@ -68,7 +68,7 @@ PACKAGE_FILE="$(node -p "require('./package.json').name.replace(/^@/, '').replac
 ARTIFACT_DIR="${DEPLOY_ARTIFACT_DIR:-$HOME/.cache/feishu-codex-bridge-deploy}"
 TGZ="$ARTIFACT_DIR/$PACKAGE_FILE"
 
-say "安装依赖并验证源码（branch=$BRANCH commit=$COMMIT version=$VERSION）"
+say "安装依赖并验证源码（branch=$BRANCH commit=$COMMIT version=${VERSION}）"
 npm ci
 npm run typecheck
 if [ "$RUN_TESTS" = "1" ]; then
@@ -93,10 +93,10 @@ hash -r
 command -v feishu-codex-bridge >/dev/null 2>&1 || die "全局安装后找不到 feishu-codex-bridge"
 INSTALLED_VERSION="$(feishu-codex-bridge --version)"
 [ "$INSTALLED_VERSION" = "$VERSION" ] ||
-  die "安装版本不一致：源码=$VERSION，命令=$INSTALLED_VERSION"
+  die "安装版本不一致：源码=${VERSION}，命令=$INSTALLED_VERSION"
 
 if [ "$NO_START" = "1" ]; then
-  ok "已安装 $BRANCH ($COMMIT) 版本 $VERSION，按 DEPLOY_NO_START=1 未启动服务"
+  ok "已安装 $BRANCH ($COMMIT) 版本 ${VERSION}，按 DEPLOY_NO_START=1 未启动服务"
   printf 'package: %s\n' "$TGZ"
   exit 0
 fi
