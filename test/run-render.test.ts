@@ -305,7 +305,7 @@ describe('buildRunCard', () => {
     ).toBeUndefined();
   });
 
-  it('keeps a disabled review placeholder on the running card', () => {
+  it('shows a non-interactive resolved status on the running card', () => {
     const card = buildRunCard({
       rs: run([{ type: 'text_delta', itemId: 'a', delta: 'working' }]),
       cardKey: 'om_card',
@@ -316,13 +316,12 @@ describe('buildRunCard', () => {
         resolved: false,
       },
     });
-    const placeholder = buttons(card).find((b) => b.label === '✅已解决');
-
-    expect(placeholder).toMatchObject({ textTag: 'plain_text', a: undefined, m: undefined });
-    expect(JSON.stringify(card)).toContain('"disabled":true');
+    expect(JSON.stringify(card)).toContain('"content":"✅ 已解决"');
+    expect(buttons(card).find((b) => b.label.includes('已解决'))).toBeUndefined();
+    expect(JSON.stringify(card)).not.toContain('"disabled":true');
   });
 
-  it('replaces the review action with a disabled adopted status after resolution', () => {
+  it('replaces the review action with non-interactive status text after resolution', () => {
     const card = buildRunCard({
       rs: run([
         { type: 'text', itemId: 'a', text: 'final answer' },
@@ -335,13 +334,12 @@ describe('buildRunCard', () => {
         resolved: true,
       },
     });
-    const status = buttons(card).find((b) => b.label === '✅已解决');
-
-    expect(status).toMatchObject({ textTag: 'plain_text', a: undefined, m: undefined });
-    expect(JSON.stringify(card)).toContain('"disabled":true');
+    expect(JSON.stringify(card)).toContain('"content":"✅ 已解决"');
+    expect(buttons(card).find((b) => b.label.includes('已解决'))).toBeUndefined();
+    expect(JSON.stringify(card)).not.toContain('"disabled":true');
   });
 
-  it('builds a terminal frame with the existing review control disabled', () => {
+  it('builds a terminal frame with non-interactive resolved status text', () => {
     const card = buildRunCardWithDisabledReview({
       rs: run([
         { type: 'text', itemId: 'a', text: 'final answer' },
@@ -357,13 +355,9 @@ describe('buildRunCard', () => {
     });
 
     expect(JSON.stringify(card)).toContain('"content":"final answer"');
-    expect(buttons(card)).toContainEqual({
-      label: '✅已解决',
-      textTag: 'plain_text',
-      a: undefined,
-      m: undefined,
-    });
-    expect(JSON.stringify(card)).toContain('"disabled":true');
+    expect(JSON.stringify(card)).toContain('"content":"✅ 已解决"');
+    expect(buttons(card).find((b) => b.label.includes('已解决'))).toBeUndefined();
+    expect(JSON.stringify(card)).not.toContain('"disabled":true');
   });
 
 });

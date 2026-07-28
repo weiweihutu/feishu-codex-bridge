@@ -56,25 +56,24 @@ export interface ReplyReviewState {
 }
 
 function resolvedButton(review: ReplyReviewState): CardElement {
+  if (review.resolved) {
+    return { tag: 'markdown', content: '✅ 已解决' };
+  }
   return {
     tag: 'button',
     text: { tag: 'plain_text', content: RESOLVED_BUTTON_TEXT },
     type: 'primary',
-    ...(review.resolved
-      ? { disabled: true }
-      : {
-          behaviors: [
-            {
-              type: 'callback',
-              value: {
-                a: RR.resolve,
-                m: review.msgId,
-                ...(review.threadId ? { t: review.threadId } : {}),
-                o: review.requesterId,
-              },
-            },
-          ],
-        }),
+    behaviors: [
+      {
+        type: 'callback',
+        value: {
+          a: RR.resolve,
+          m: review.msgId,
+          ...(review.threadId ? { t: review.threadId } : {}),
+          o: review.requesterId,
+        },
+      },
+    ],
   };
 }
 
