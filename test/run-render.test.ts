@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mapNotification } from '../src/agent/codex-appserver/event-map';
 import type { ServerNotification, ThreadItem } from '../src/agent/codex-appserver/protocol';
 import type { AgentEvent } from '../src/agent/types';
-import { buildRunCard, buildRunCardWithDisabledReview, RC, RR } from '../src/card/run-card';
+import { buildRunCard, buildRunCardWithoutReview, RC, RR } from '../src/card/run-card';
 import {
   initialState,
   markIdleTimeout,
@@ -305,7 +305,7 @@ describe('buildRunCard', () => {
     ).toBeUndefined();
   });
 
-  it('shows a non-interactive resolved status on the running card', () => {
+  it('does not show a review control while the reply is still streaming', () => {
     const card = buildRunCard({
       rs: run([{ type: 'text_delta', itemId: 'a', delta: 'working' }]),
       cardKey: 'om_card',
@@ -316,9 +316,8 @@ describe('buildRunCard', () => {
         resolved: false,
       },
     });
-    expect(JSON.stringify(card)).toContain('"content":"✅ 已解决"');
+    expect(JSON.stringify(card)).not.toContain('已解决');
     expect(buttons(card).find((b) => b.label.includes('已解决'))).toBeUndefined();
-    expect(JSON.stringify(card)).not.toContain('"disabled":true');
   });
 
   it('replaces the review action with non-interactive status text after resolution', () => {
@@ -339,8 +338,8 @@ describe('buildRunCard', () => {
     expect(JSON.stringify(card)).not.toContain('"disabled":true');
   });
 
-  it('builds a terminal frame with non-interactive resolved status text', () => {
-    const card = buildRunCardWithDisabledReview({
+  it('builds an intermediate terminal frame without a review control', () => {
+    const card = buildRunCardWithoutReview({
       rs: run([
         { type: 'text', itemId: 'a', text: 'final answer' },
         { type: 'done', turnId: 'turn-1' },
@@ -355,9 +354,8 @@ describe('buildRunCard', () => {
     });
 
     expect(JSON.stringify(card)).toContain('"content":"final answer"');
-    expect(JSON.stringify(card)).toContain('"content":"✅ 已解决"');
+    expect(JSON.stringify(card)).not.toContain('已解决');
     expect(buttons(card).find((b) => b.label.includes('已解决'))).toBeUndefined();
-    expect(JSON.stringify(card)).not.toContain('"disabled":true');
   });
 
 });

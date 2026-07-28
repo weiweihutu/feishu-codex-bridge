@@ -87,7 +87,7 @@ import {
   buildQueuedCard,
   buildRunCard,
   buildRunCardPlain,
-  buildRunCardWithDisabledReview,
+  buildRunCardWithoutReview,
   CONTROLS_EID,
   RC,
   RR,
@@ -2467,7 +2467,12 @@ export function createOrchestrator(
         return;
       }
       const stored = reviewCards.get(evt.messageId);
+      if (!stored?.rc.review) {
+        log.info('card', 'review-action-missing', { cardMsgId: evt.messageId });
+        return;
+      }
       if (stored?.rc.review?.resolved) return;
+      stored.rc.review.resolved = true;
       const operatedAt = new Date().toISOString();
       withTrace({ chatId: evt.chatId, msgId: review.msgId }, () => {
         log.info('audit', 'reply_reviewed', {
@@ -2479,10 +2484,11 @@ export function createOrchestrator(
           operatedAt,
         });
       });
-      if (stored?.rc.review) {
-        stored.rc.review.resolved = true;
-        await stored.stream.updateCard(channel, buildRunCard(stored.rc));
-      }
+      void (async () => {
+        await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
+        const updated = await stored.stream.updateCard(channel, buildRunCard(stored.rc));
+        log.info('card', 'review-status-update', { updated, waitedMs: CARD_SETTLE_MS });
+      })();
     })
     .on(MC.model, ({ evt, option }) => {
       const state = authPending(modelPending, evt);
@@ -4767,8 +4773,13 @@ export function createOrchestrator(
         // finalizeCard, while callbacks arriving from now on cannot overwrite it.
         const manuallyRequested = Boolean(state.completionReminderRequested);
         completionReminderRefreshers.delete(cardMsgId);
-        const terminalCardUpdated = await stream.finalizeCard(channel, buildRunCardWithDisabledReview(rc));
+        const terminalCardUpdated = await stream.finalizeCard(channel, buildRunCardWithoutReview(rc));
         if (terminalCardUpdated && rc.review) {
+          reviewCards.set(finalMsgId, { rc, stream });
+          if (reviewCards.size > 2048) {
+            const oldest = reviewCards.keys().next().value;
+            if (oldest) reviewCards.delete(oldest);
+          }
           await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
           const reviewCardUpdated = await stream.updateCard(channel, buildRunCard(rc));
           log.info('card', 'review-action-update', { updated: reviewCardUpdated, waitedMs: CARD_SETTLE_MS });
@@ -4799,7 +4810,7 @@ export function createOrchestrator(
           intake = undefined; // 排队续轮没有入站段，别把首轮数值带下去
         }
         runsByCard.delete(cardMsgId);
-        if (rc.review) {
+        if (rc.review && !reviewCards.has(finalMsgId)) {
           reviewCards.set(finalMsgId, { rc, stream });
           if (reviewCards.size > 2048) {
             const oldest = reviewCards.keys().next().value;

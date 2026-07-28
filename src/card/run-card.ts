@@ -276,10 +276,6 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
     }
     if (controls.length > 0) elements.push(actions(controls, CONTROLS_EID));
   }
-  if (rc.review) {
-    elements.push(actions([resolvedButton({ ...rc.review, resolved: true })], REVIEW_ACTION_EID));
-  }
-
   return elements;
 }
 
@@ -447,11 +443,11 @@ export function buildRunCardPlain(rc: RunCardState): CardObject {
   return buildRunCard({ ...rc, cardKey: undefined });
 }
 
-/** Terminal frame that preserves the existing review control but keeps it disabled. */
-export function buildRunCardWithDisabledReview(rc: RunCardState): CardObject {
+/** Terminal frame used before the live review action is attached. */
+export function buildRunCardWithoutReview(rc: RunCardState): CardObject {
   return buildRunCard({
     ...rc,
-    review: rc.review ? { ...rc.review, resolved: true } : undefined,
+    review: undefined,
   });
 }
 
