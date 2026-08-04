@@ -20,6 +20,7 @@ import {
   type Terminal,
   type ToolEntry,
 } from './run-state';
+import { visibleReplyText } from '../core/reply-visibility';
 import { renderRichText } from './markdown-render';
 import { toolBodyMd, toolHeaderText, toolSummaryLine } from './tool-render';
 import { runCardGauge } from './context-gauge';
@@ -226,7 +227,7 @@ function renderRunning(state: RunState, rc: RunCardState): CardElement[] {
   // Single streamed answer element. Only emitted once there's text, so its first
   // appearance is one whole-card update that establishes the element; subsequent
   // growth streams via cardElement.content. Stable element_id ⇒ append-only prefix.
-  const answer = textParts.join('\n\n');
+  const answer = visibleReplyText(textParts.join('\n\n'), 'streaming');
   if (answer) elements.push(mdStream(answer, ANSWER_EID));
 
   // Footer: status (left) + 模型·effort footnote (right) share one row when the
@@ -291,7 +292,10 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   const elements: CardElement[] = [];
 
   const answerIdx = lastTextIndex(state.blocks);
-  const answer = answerIdx >= 0 ? (state.blocks[answerIdx] as Extract<Block, { kind: 'text' }>).content.trim() : '';
+  const answer =
+    answerIdx >= 0
+      ? visibleReplyText((state.blocks[answerIdx] as Extract<Block, { kind: 'text' }>).content, 'terminal')
+      : '';
 
   // Everything except the final answer block is "process". (A block after the
   // answer can only be a trailing tool call — keep it folded with the rest.)

@@ -238,6 +238,39 @@ describe('ordinary turn completion audit orchestration', () => {
     expect(String(emitted[0]?.replyText)).not.toContain('progress');
   });
 
+  it('emits the full reply, visible reply, and structured provenance separately', () => {
+    const reply = [
+      '结论：需要核对平台映射。',
+      '',
+      '来源：知识库',
+      '系统：OMS',
+      '知识库：oms-business-wiki',
+      '说明：未实时查询。',
+    ].join('\n');
+    let state = structuredClone(initialState);
+    state = reduce(state, { type: 'text', itemId: 'final', text: reply });
+    state = reduce(state, { type: 'done', turnId: 'turn-visible-audit' });
+    const emitted: Record<string, unknown>[] = [];
+
+    emitOrdinaryTurnCompletion(
+      { audit: audit('om_visible'), completionEmitted: false },
+      { kind: 'success', runState: state, images: 0 },
+      (_ctx, fields = {}) => emitted.push(fields),
+    );
+
+    expect(emitted[0]).toMatchObject({
+      replyText: reply,
+      visibleReplyText: '结论：需要核对平台映射。',
+      replyMetadata: {
+        source: '知识库',
+        system: 'OMS',
+        knowledgeBases: 'oms-business-wiki',
+        note: '未实时查询。',
+      },
+      textChars: reply.length,
+    });
+  });
+
   it('does nothing when the launch has no audit context', () => {
     const emitted: Record<string, unknown>[] = [];
     emitOrdinaryTurnCompletion(

@@ -114,6 +114,7 @@ import {
   traceFieldsForAgentEvent,
   type AuditContext,
 } from '../core/audit-trace';
+import { parseReplyPresentation } from '../core/reply-visibility';
 import { appendFeishuContext, shouldRespondWithoutMention } from './feishu-message-policy';
 import {
   buildAddAdminCard,
@@ -517,10 +518,13 @@ export function emitOrdinaryTurnCompletion(
   try {
     if (completion.kind === 'success') {
       const replyText = finalMessageText(completion.runState);
+      const presentation = parseReplyPresentation(replyText);
       emit(turn.audit, {
         ...common,
         terminal: completion.runState.terminal,
-        replyText,
+        replyText: presentation.fullText,
+        visibleReplyText: presentation.visibleText,
+        replyMetadata: presentation.metadata,
         textChars: replyText.length,
       });
     } else {

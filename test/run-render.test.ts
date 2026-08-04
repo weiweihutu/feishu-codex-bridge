@@ -239,6 +239,31 @@ describe('buildRunCard — fatal error advice', () => {
 });
 
 describe('buildRunCard', () => {
+  it('hides terminal provenance metadata from running and completed cards', () => {
+    const reply = [
+      '结论：需要核对平台映射。',
+      '',
+      '来源：知识库',
+      '系统：OMS',
+      '知识库：oms-business-wiki',
+      '说明：未实时查询。',
+    ].join('\n');
+    const runningState = run([{ type: 'text_delta', itemId: 'answer', delta: reply }]);
+    const completedState = run([
+      { type: 'text', itemId: 'answer', text: reply },
+      { type: 'done', turnId: 'turn-visibility' },
+    ]);
+
+    const runningJson = JSON.stringify(buildRunCard({ rs: runningState }));
+    const completedJson = JSON.stringify(buildRunCard({ rs: completedState }));
+
+    expect(runningJson).toContain('结论：需要核对平台映射。');
+    expect(completedJson).toContain('结论：需要核对平台映射。');
+    expect(runningJson).not.toContain('来源：知识库');
+    expect(completedJson).not.toContain('来源：知识库');
+    expect(completedJson).not.toContain('oms-business-wiki');
+  });
+
   it('renders no header and streams while running', () => {
     const rs = run([{ type: 'text_delta', itemId: 'a', delta: 'hi' }]);
     const card = buildRunCard({ rs, cardKey: 'm1' }) as { header?: unknown; config: { streaming_mode?: boolean } };
