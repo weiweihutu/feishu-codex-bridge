@@ -40,7 +40,13 @@ function escapeXml(value: string): string {
 export function buildPlist(): string {
   const nodePath = process.execPath;
   const cliBinPath = resolveCliBinPath();
+  const serviceWrapper = process.env.FEISHU_CODEX_BRIDGE_SERVICE_WRAPPER?.trim();
   const pathEnv = process.env.PATH ?? '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+  const programArguments = serviceWrapper
+    ? `    <string>${escapeXml(serviceWrapper)}</string>`
+    : `    <string>${escapeXml(nodePath)}</string>
+    <string>${escapeXml(cliBinPath)}</string>
+    <string>run</string>`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -50,9 +56,7 @@ export function buildPlist(): string {
   <string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${escapeXml(nodePath)}</string>
-    <string>${escapeXml(cliBinPath)}</string>
-    <string>run</string>
+${programArguments}
   </array>
   <key>RunAtLoad</key>
   <true/>

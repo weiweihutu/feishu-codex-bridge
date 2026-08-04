@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { buildPlist } from '../src/service/launchd';
 import { buildUnit, SYSTEMD_UNIT_NAME } from '../src/service/systemd';
 import { buildLauncherCmd, buildLauncherVbs } from '../src/service/win-startup';
 
@@ -6,10 +7,29 @@ import { buildLauncherCmd, buildLauncherVbs } from '../src/service/win-startup';
 // generated text that can't be exercised on the mac dev box — lock their shape
 // here so a refactor can't silently break the daemon definitions.
 
-describe('systemd unit (buildUnit)', () => {
-  const unit = buildUnit();
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
+describe('launchd plist (buildPlist)', () => {
+  it('runs the configured service wrapper instead of the Node CLI', () => {
+    vi.stubEnv(
+      'FEISHU_CODEX_BRIDGE_SERVICE_WRAPPER',
+      '/Users/test user/.feishu-codex-bridge/workspace/gbrain/run_feishu_bot.sh',
+    );
+
+    const plist = buildPlist();
+
+    expect(plist).toContain(
+      '<string>/Users/test user/.feishu-codex-bridge/workspace/gbrain/run_feishu_bot.sh</string>',
+    );
+    expect(plist).not.toContain('<string>run</string>');
+  });
+});
+
+describe('systemd unit (buildUnit)', () => {
   it('is a well-formed user service with crash-restart + login autostart', () => {
+    const unit = buildUnit();
     expect(unit).toContain('[Service]');
     expect(unit).toContain('Type=simple');
     expect(unit).toContain('Restart=always');
@@ -19,6 +39,7 @@ describe('systemd unit (buildUnit)', () => {
   });
 
   it('runs the bridge `run` subcommand and appends to the shared log files', () => {
+    const unit = buildUnit();
     expect(unit).toMatch(/ExecStart=".+" ".+" run/);
     expect(unit).toContain('StandardOutput=append:');
     expect(unit).toContain('StandardError=append:');
@@ -27,6 +48,20 @@ describe('systemd unit (buildUnit)', () => {
 
   it('unit name is a .service', () => {
     expect(SYSTEMD_UNIT_NAME).toMatch(/\.service$/);
+  });
+
+  it('runs the configured service wrapper instead of the Node CLI', () => {
+    vi.stubEnv(
+      'FEISHU_CODEX_BRIDGE_SERVICE_WRAPPER',
+      '/home/test user/.feishu-codex-bridge/workspace/gbrain/run_feishu_bot.sh',
+    );
+
+    const unit = buildUnit();
+
+    expect(unit).toContain(
+      'ExecStart="/home/test user/.feishu-codex-bridge/workspace/gbrain/run_feishu_bot.sh"',
+    );
+    expect(unit).not.toMatch(/ExecStart=".+" ".+" run/);
   });
 });
 

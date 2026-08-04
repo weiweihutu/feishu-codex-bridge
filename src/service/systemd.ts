@@ -41,7 +41,11 @@ export function buildUnit(): string {
   const esc = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const nodePath = process.execPath;
   const cliBinPath = resolveCliBinPath();
+  const serviceWrapper = process.env.FEISHU_CODEX_BRIDGE_SERVICE_WRAPPER?.trim();
   const pathEnv = process.env.PATH ?? '';
+  const execStart = serviceWrapper
+    ? `"${esc(serviceWrapper)}"`
+    : `"${esc(nodePath)}" "${esc(cliBinPath)}" run`;
   return `[Unit]
 Description=feishu-codex-bridge bot
 After=network-online.target
@@ -49,7 +53,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart="${esc(nodePath)}" "${esc(cliBinPath)}" run
+ExecStart=${execStart}
 Restart=always
 RestartSec=5
 StandardOutput=append:${serviceStdoutPath()}

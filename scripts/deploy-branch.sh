@@ -101,6 +101,17 @@ if [ "$NO_START" = "1" ]; then
   exit 0
 fi
 
+SERVICE_WRAPPER="${FEISHU_CODEX_BRIDGE_SERVICE_WRAPPER:-$HOME/.feishu-codex-bridge/workspace/gbrain/run_feishu_bot.sh}"
+if [ -e "$SERVICE_WRAPPER" ] && [ ! -x "$SERVICE_WRAPPER" ]; then
+  die "后台服务启动脚本不可执行：$SERVICE_WRAPPER"
+fi
+if [ -x "$SERVICE_WRAPPER" ]; then
+  export FEISHU_CODEX_BRIDGE_SERVICE_WRAPPER="$SERVICE_WRAPPER"
+  say "使用后台服务启动脚本：$SERVICE_WRAPPER"
+else
+  say "未找到后台服务启动脚本，使用 feishu-codex-bridge 默认启动方式"
+fi
+
 say "安装并启动后台服务"
 feishu-codex-bridge start
 feishu-codex-bridge status
