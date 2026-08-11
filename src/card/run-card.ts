@@ -4,10 +4,14 @@ import {
   card,
   collapsiblePanel,
   collapsiblePanelEl,
+  form,
+  input,
   md,
   mdStream,
   noteMd,
   splitRow,
+  submitButton,
+  type ActionValue,
   type CardElement,
   type CardObject,
 } from './cards';
@@ -42,10 +46,18 @@ export const RC = {
 /** Action ids for requester review of a completed reply. */
 export const RR = {
   resolve: 'reply.resolve',
+  unresolvedOpen: 'reply.unresolved.open',
+  unresolvedSubmit: 'reply.unresolved.submit',
+  unresolvedCancel: 'reply.unresolved.cancel',
 } as const;
 
 const RESOLVED_BUTTON_TEXT = '✅已解决';
+const UNRESOLVED_BUTTON_TEXT = '❌未解决';
 const REVIEW_ACTION_EID = 'review_action';
+const REVIEW_FEEDBACK_FORM = 'reply_feedback';
+const REVIEW_FEEDBACK_INPUT = 'feedback';
+
+export type ReplyReviewStatus = 'pending' | 'unresolved-form' | 'resolved' | 'unresolved';
 
 export interface ReplyReviewState {
   /** Inbound user-message id; first-turn reviews associate through this field. */
@@ -53,29 +65,56 @@ export interface ReplyReviewState {
   /** Inbound thread id; null on the first message that creates a topic. */
   threadId: string | null;
   requesterId: string;
-  resolved: boolean;
+  status: ReplyReviewStatus;
+  /** Changes on every transition so the SDK does not deduplicate later clicks. */
+  revision: number;
+  feedback?: string;
 }
 
-function resolvedButton(review: ReplyReviewState): CardElement {
-  if (review.resolved) {
-    return { tag: 'markdown', content: '✅ 已解决' };
-  }
+function reviewActionValue(review: ReplyReviewState, action: string): ActionValue {
   return {
-    tag: 'button',
-    text: { tag: 'plain_text', content: RESOLVED_BUTTON_TEXT },
-    type: 'primary',
-    behaviors: [
-      {
-        type: 'callback',
-        value: {
-          a: RR.resolve,
-          m: review.msgId,
-          ...(review.threadId ? { t: review.threadId } : {}),
-          o: review.requesterId,
-        },
-      },
-    ],
+    a: action,
+    m: review.msgId,
+    ...(review.threadId ? { t: review.threadId } : {}),
+    o: review.requesterId,
+    r: review.revision,
   };
+}
+
+function reviewElements(review: ReplyReviewState): CardElement[] {
+  if (review.status === 'resolved') return [{ tag: 'markdown', content: '✅ 已解决' }];
+  if (review.status === 'unresolved') {
+    return [{ tag: 'markdown', content: '❌ 未解决反馈已记录' }];
+  }
+  if (review.status === 'unresolved-form') {
+    return [
+      form(REVIEW_FEEDBACK_FORM, [
+        input({
+          name: REVIEW_FEEDBACK_INPUT,
+          label: '人工回复',
+          placeholder: '请输入未解决的原因',
+          required: true,
+          inputType: 'multiline_text',
+          rows: 4,
+          width: 'fill',
+          maxLength: 1000,
+        }),
+        actions([
+          submitButton('提交', reviewActionValue(review, RR.unresolvedSubmit), 'primary', 'submit_feedback'),
+          button('取消', reviewActionValue(review, RR.unresolvedCancel), 'default'),
+        ]),
+      ]),
+    ];
+  }
+  return [
+    actions(
+      [
+        button(RESOLVED_BUTTON_TEXT, reviewActionValue(review, RR.resolve), 'primary'),
+        button(UNRESOLVED_BUTTON_TEXT, reviewActionValue(review, RR.unresolvedOpen), 'default'),
+      ],
+      REVIEW_ACTION_EID,
+    ),
+  ];
 }
 
 /**
@@ -342,7 +381,7 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   const mEl = rc.modelOnTerminal ? modelEl(rc) : null;
   if (mEl) elements.push(mEl);
   if (state.terminal === 'done' && answer && rc.review) {
-    elements.push(actions([resolvedButton(rc.review)], REVIEW_ACTION_EID));
+    elements.push(...reviewElements(rc.review));
   }
 
   return elements;

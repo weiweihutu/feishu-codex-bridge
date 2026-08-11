@@ -462,13 +462,39 @@ export function buildReplyReview(
     msgId,
     threadId: typeof audit?.threadId === 'string' && audit.threadId ? audit.threadId : null,
     requesterId,
-    resolved: false,
+    status: 'pending',
+    revision: 0,
   };
 }
 
 /** Review actions deliberately have no administrator override. */
 export function canResolveReply(operatorOpenId?: string, requesterOpenId?: string): boolean {
   return Boolean(operatorOpenId && requesterOpenId && operatorOpenId === requesterOpenId);
+}
+
+/** Normalize feedback defensively even though the card input already enforces 1000 chars. */
+export function normalizeReplyReviewFeedback(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const feedback = value.trim().slice(0, 1000);
+  return feedback || undefined;
+}
+
+export function buildReplyReviewAuditFields(opts: {
+  review: ReplyReviewState;
+  cardMsgId: string;
+  operatorId: string;
+  operatedAt: string;
+}): Record<string, unknown> {
+  return {
+    action: 'unresolved',
+    decision: 'not_adopted',
+    feedback: opts.review.feedback ?? '',
+    threadId: opts.review.threadId,
+    cardMsgId: opts.cardMsgId,
+    requesterId: opts.review.requesterId,
+    operatorId: opts.operatorId,
+    operatedAt: opts.operatedAt,
+  };
 }
 
 /**
@@ -2450,33 +2476,67 @@ export function createOrchestrator(
     return state;
   }
 
+  function reviewRoute(value: Record<string, unknown>): {
+    msgId: string;
+    threadId: string | null;
+    requesterId: string;
+  } {
+    return {
+      msgId: typeof value.m === 'string' ? value.m : '',
+      threadId: typeof value.t === 'string' && value.t ? value.t : null,
+      requesterId: typeof value.o === 'string' ? value.o : '',
+    };
+  }
+
+  async function authorizeReplyReview(
+    evt: CardActionEvent,
+    value: Record<string, unknown>,
+    actionId: string,
+  ): Promise<ReturnType<typeof reviewRoute> | undefined> {
+    const review = reviewRoute(value);
+    const operatorId = evt.operator?.openId ?? '';
+    if (!runAllowed(evt) || !review.msgId || !review.requesterId) return undefined;
+    if (canResolveReply(operatorId, review.requesterId)) return review;
+    log.info('card', 'action-denied', { actionId, reason: 'not-requester' });
+    await channel
+      .send(
+        evt.chatId,
+        { markdown: '⚠️ 仅问题发起人可以操作本次回复反馈。' },
+        { replyTo: evt.messageId, replyInThread: true },
+      )
+      .catch(() => undefined);
+    return undefined;
+  }
+
+  function updateReplyReviewCard(
+    evt: CardActionEvent,
+    stored: { rc: RunCardState; stream: RunCardStream },
+    fallbackFresh = false,
+  ): void {
+    void (async () => {
+      await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
+      const card = buildRunCard(stored.rc);
+      const updated = await stored.stream.updateCard(channel, card).catch(() => false);
+      log.info('card', 'review-status-update', { updated, waitedMs: CARD_SETTLE_MS });
+      if (!updated && fallbackFresh) {
+        await sendManagedCard(channel, evt.chatId, card, evt.messageId, true);
+      }
+    })().catch((err) => log.fail('card', err, { phase: 'review-status-update' }));
+  }
+
   dispatcher
     .on(RR.resolve, async ({ evt, value }) => {
-      const review = {
-        msgId: typeof value.m === 'string' ? value.m : '',
-        threadId: typeof value.t === 'string' && value.t ? value.t : null,
-        requesterId: typeof value.o === 'string' ? value.o : '',
-      };
+      const review = await authorizeReplyReview(evt, value, RR.resolve);
+      if (!review) return;
       const operatorId = evt.operator?.openId ?? '';
-      if (!runAllowed(evt) || !review.msgId || !review.requesterId) return;
-      if (!canResolveReply(operatorId, review.requesterId)) {
-        log.info('card', 'action-denied', { actionId: RR.resolve, reason: 'not-requester' });
-        await channel
-          .send(
-            evt.chatId,
-            { markdown: '⚠️ 仅问题发起人可以标记已解决。' },
-            { replyTo: evt.messageId, replyInThread: true },
-          )
-          .catch(() => undefined);
-        return;
-      }
       const stored = reviewCards.get(evt.messageId);
       if (!stored?.rc.review) {
         log.info('card', 'review-action-missing', { cardMsgId: evt.messageId });
         return;
       }
-      if (stored?.rc.review?.resolved) return;
-      stored.rc.review.resolved = true;
+      if (stored.rc.review.status !== 'pending') return;
+      stored.rc.review.status = 'resolved';
+      stored.rc.review.revision += 1;
       const operatedAt = new Date().toISOString();
       withTrace({ chatId: evt.chatId, msgId: review.msgId }, () => {
         log.info('audit', 'reply_reviewed', {
@@ -2488,11 +2548,68 @@ export function createOrchestrator(
           operatedAt,
         });
       });
-      void (async () => {
-        await new Promise((r) => setTimeout(r, CARD_SETTLE_MS));
-        const updated = await stored.stream.updateCard(channel, buildRunCard(stored.rc));
-        log.info('card', 'review-status-update', { updated, waitedMs: CARD_SETTLE_MS });
-      })();
+      updateReplyReviewCard(evt, stored);
+    })
+    .on(RR.unresolvedOpen, async ({ evt, value }) => {
+      const review = await authorizeReplyReview(evt, value, RR.unresolvedOpen);
+      if (!review) return;
+      const stored = reviewCards.get(evt.messageId);
+      if (!stored?.rc.review) {
+        log.info('card', 'review-action-missing', { cardMsgId: evt.messageId });
+        return;
+      }
+      if (stored.rc.review.status !== 'pending') return;
+      stored.rc.review.status = 'unresolved-form';
+      stored.rc.review.revision += 1;
+      updateReplyReviewCard(evt, stored);
+    })
+    .on(RR.unresolvedCancel, async ({ evt, value }) => {
+      const review = await authorizeReplyReview(evt, value, RR.unresolvedCancel);
+      if (!review) return;
+      const stored = reviewCards.get(evt.messageId);
+      if (!stored?.rc.review) {
+        log.info('card', 'review-action-missing', { cardMsgId: evt.messageId });
+        return;
+      }
+      if (stored.rc.review.status !== 'unresolved-form') return;
+      stored.rc.review.status = 'pending';
+      stored.rc.review.revision += 1;
+      delete stored.rc.review.feedback;
+      updateReplyReviewCard(evt, stored);
+    })
+    .on(RR.unresolvedSubmit, async ({ evt, value, formValue }) => {
+      const review = await authorizeReplyReview(evt, value, RR.unresolvedSubmit);
+      if (!review) return;
+      const stored = reviewCards.get(evt.messageId);
+      if (!stored?.rc.review) {
+        log.info('card', 'review-action-missing', { cardMsgId: evt.messageId });
+        return;
+      }
+      if (stored.rc.review.status !== 'unresolved-form') return;
+      const feedback = normalizeReplyReviewFeedback(formValue?.feedback);
+      if (!feedback) {
+        log.info('card', 'review-feedback-invalid', { cardMsgId: evt.messageId, reason: 'empty' });
+        return;
+      }
+      stored.rc.review.status = 'unresolved';
+      stored.rc.review.revision += 1;
+      stored.rc.review.feedback = feedback;
+      const operatedAt = new Date().toISOString();
+      withTrace({ chatId: evt.chatId, msgId: review.msgId }, () => {
+        log.info(
+          'audit',
+          'reply_reviewed',
+          buildReplyReviewAuditFields({
+            review: stored.rc.review!,
+            cardMsgId: evt.messageId,
+            operatorId: evt.operator?.openId ?? '',
+            operatedAt,
+          }),
+        );
+      });
+      // Submitted CardKit forms may reject later entity updates. Try the original
+      // card first; if Feishu locked it, post one static replacement in-topic.
+      updateReplyReviewCard(evt, stored, true);
     })
     .on(MC.model, ({ evt, option }) => {
       const state = authPending(modelPending, evt);

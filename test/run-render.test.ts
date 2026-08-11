@@ -291,7 +291,8 @@ describe('buildRunCard', () => {
       msgId: 'om_question',
       threadId: null,
       requesterId: 'ou_requester',
-      resolved: false,
+      status: 'pending' as const,
+      revision: 0,
     };
     const doneWithAnswer = run([
       { type: 'text', itemId: 'a', text: 'final answer' },
@@ -302,6 +303,11 @@ describe('buildRunCard', () => {
 
     expect(resolve).toMatchObject({
       label: '✅已解决',
+      textTag: 'plain_text',
+      m: 'om_question',
+    });
+    expect(buttons(card).find((b) => b.a === RR.unresolvedOpen)).toMatchObject({
+      label: '❌未解决',
       textTag: 'plain_text',
       m: 'om_question',
     });
@@ -338,7 +344,8 @@ describe('buildRunCard', () => {
         msgId: 'om_question',
         threadId: null,
         requesterId: 'ou_requester',
-        resolved: false,
+        status: 'pending',
+        revision: 0,
       },
     });
     expect(JSON.stringify(card)).not.toContain('已解决');
@@ -355,12 +362,98 @@ describe('buildRunCard', () => {
         msgId: 'om_question',
         threadId: 'omt_topic',
         requesterId: 'ou_requester',
-        resolved: true,
+        status: 'resolved',
+        revision: 1,
       },
     });
     expect(JSON.stringify(card)).toContain('"content":"✅ 已解决"');
     expect(buttons(card).find((b) => b.label.includes('已解决'))).toBeUndefined();
     expect(JSON.stringify(card)).not.toContain('"disabled":true');
+  });
+
+  it('shows the unresolved feedback input below the answer with submit and cancel actions', () => {
+    const card = buildRunCard({
+      rs: run([
+        { type: 'text', itemId: 'a', text: 'final answer' },
+        { type: 'done', turnId: 'turn-1' },
+      ]),
+      review: {
+        msgId: 'om_question',
+        threadId: 'omt_topic',
+        requesterId: 'ou_requester',
+        status: 'unresolved-form',
+        revision: 1,
+      },
+    });
+    const json = JSON.stringify(card);
+
+    expect(json.indexOf('"content":"final answer"')).toBeLessThan(json.indexOf('"name":"feedback"'));
+    expect(json).toContain('"content":"人工回复"');
+    expect(json).not.toContain('"content":"未解决原因"');
+    expect(json).toContain('"input_type":"multiline_text"');
+    expect(json).toContain('"max_length":1000');
+    expect(json).toContain('"required":true');
+    expect(buttons(card).find((b) => b.a === RR.unresolvedSubmit)).toMatchObject({
+      label: '提交',
+      m: 'om_question',
+    });
+    expect(buttons(card).find((b) => b.a === RR.unresolvedCancel)).toMatchObject({
+      label: '取消',
+      m: 'om_question',
+    });
+    expect(buttons(card).find((b) => b.a === RR.unresolvedOpen)).toBeUndefined();
+  });
+
+  it('changes the unresolved callback value after cancel restores the review buttons', () => {
+    const rs = run([
+      { type: 'text', itemId: 'a', text: 'final answer' },
+      { type: 'done', turnId: 'turn-1' },
+    ]);
+    const first = buildRunCard({
+      rs,
+      review: {
+        msgId: 'om_question',
+        threadId: 'omt_topic',
+        requesterId: 'ou_requester',
+        status: 'pending',
+        revision: 0,
+      },
+    });
+    const restored = buildRunCard({
+      rs,
+      review: {
+        msgId: 'om_question',
+        threadId: 'omt_topic',
+        requesterId: 'ou_requester',
+        status: 'pending',
+        revision: 2,
+      },
+    });
+
+    expect(buttons(first).find((b) => b.a === RR.unresolvedOpen)?.r).toBe(0);
+    expect(buttons(restored).find((b) => b.a === RR.unresolvedOpen)?.r).toBe(2);
+  });
+
+  it('replaces unresolved feedback controls with non-interactive status text after submission', () => {
+    const card = buildRunCard({
+      rs: run([
+        { type: 'text', itemId: 'a', text: 'final answer' },
+        { type: 'done', turnId: 'turn-1' },
+      ]),
+      review: {
+        msgId: 'om_question',
+        threadId: 'omt_topic',
+        requesterId: 'ou_requester',
+        status: 'unresolved',
+        revision: 2,
+        feedback: '回答没有覆盖部署失败的原因',
+      },
+    });
+    const json = JSON.stringify(card);
+
+    expect(json).toContain('"content":"❌ 未解决反馈已记录"');
+    expect(json).not.toContain('"name":"feedback"');
+    expect(buttons(card).filter((b) => String(b.a).startsWith('reply.'))).toHaveLength(0);
   });
 
   it('builds an intermediate terminal frame without a review control', () => {
@@ -374,7 +467,8 @@ describe('buildRunCard', () => {
         msgId: 'om_question',
         threadId: null,
         requesterId: 'ou_requester',
-        resolved: false,
+        status: 'pending',
+        revision: 0,
       },
     });
 
@@ -388,14 +482,20 @@ describe('buildRunCard', () => {
 /** Collect every button's {label, action, msgId} from a built card. */
 function buttons(
   node: unknown,
-  acc: { label: string; textTag: unknown; a: unknown; m: unknown }[] = [],
-): { label: string; textTag: unknown; a: unknown; m: unknown }[] {
+  acc: { label: string; textTag: unknown; a: unknown; m: unknown; r: unknown }[] = [],
+): { label: string; textTag: unknown; a: unknown; m: unknown; r: unknown }[] {
   if (Array.isArray(node)) node.forEach((n) => buttons(n, acc));
   else if (node && typeof node === 'object') {
     const o = node as Record<string, any>;
     if (o.tag === 'button') {
       const value = o.behaviors?.[0]?.value ?? {};
-      acc.push({ label: o.text?.content, textTag: o.text?.tag, a: value.a, m: value.m });
+      acc.push({
+        label: o.text?.content,
+        textTag: o.text?.tag,
+        a: value.a,
+        m: value.m,
+        r: value.r,
+      });
     }
     for (const k of Object.keys(o)) buttons(o[k], acc);
   }
