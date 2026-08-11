@@ -107,7 +107,7 @@ export async function collectInboundImages(
 
   const out = [] as InboundImages;
   const imageFiles: PersistedImageFile[] = [];
-  const workspaceRoot = options.workspaceRoot ?? join(paths.appDir, 'my_workspace');
+  const workspaceRoot = options.workspaceRoot ?? join(paths.appDir, 'workspace');
   const day = dateKey((options.now ?? (() => new Date()))());
   const statFile = options.statFile ?? stat;
   let index = 0;

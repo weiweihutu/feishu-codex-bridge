@@ -70,7 +70,7 @@ function normalizeCorrelationIds(
 }
 
 function workspaceRoot(io: TraceIo): string {
-  return io.workspaceRoot ?? join(paths.appDir, 'my_workspace');
+  return io.workspaceRoot ?? join(paths.appDir, 'workspace');
 }
 
 function currentTime(io: TraceIo): Date {
