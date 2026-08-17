@@ -130,6 +130,8 @@ describe('ordinary turn completion audit orchestration', () => {
     msgId,
     chatId: 'oc_1',
     threadId: 'omt_1',
+    rootId: null,
+    parentId: null,
     senderId: `ou_${msgId}`,
     traceId: `trace_${msgId}`,
     startedAt: '2026-07-23T00:00:00.000Z',

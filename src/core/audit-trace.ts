@@ -24,6 +24,8 @@ export interface AuditMessage {
   messageId: string;
   chatId: string;
   threadId?: string | null;
+  rootId?: string | null;
+  replyToMessageId?: string | null;
   senderId?: string | null;
   chatType: string;
   mentionedBot: boolean;
@@ -36,13 +38,23 @@ export type AuditContext = Record<string, unknown> & {
   msgId: string;
   chatId: string;
   threadId: string | null;
+  rootId: string | null;
+  parentId: string | null;
   senderId: string | null;
 };
+
+export interface MessageRelation {
+  threadId: string | null;
+  rootId: string | null;
+  parentId: string | null;
+}
 
 const AUDIT_CORE_KEYS = new Set([
   'msgId',
   'chatId',
   'threadId',
+  'rootId',
+  'parentId',
   'senderId',
   'chatType',
   'mentionedBot',
@@ -114,6 +126,8 @@ export function buildAuditContext(
     msgId: msg.messageId,
     chatId: msg.chatId,
     threadId: msg.threadId ?? null,
+    rootId: msg.rootId ?? null,
+    parentId: msg.replyToMessageId ?? null,
     senderId: msg.senderId ?? null,
     chatType: msg.chatType,
     mentionedBot: msg.mentionedBot,
@@ -121,6 +135,16 @@ export function buildAuditContext(
     messageTextTruncated: messageText.truncated,
     receivedAt: new Date(msg.createTime || Date.now()).toISOString(),
   };
+}
+
+export function applyMessageRelationToAudit(
+  audit: AuditContext | undefined,
+  relation: MessageRelation,
+): void {
+  if (!audit) return;
+  audit.threadId = relation.threadId ?? audit.threadId;
+  audit.rootId = relation.rootId ?? audit.rootId;
+  audit.parentId = relation.parentId ?? audit.parentId;
 }
 
 export function traceFieldsForAgentEvent(

@@ -1,12 +1,24 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getThreadId } from '../src/bot/handle-message';
+import { getMessageRelation, getThreadId } from '../src/bot/handle-message';
 
 // 不引真 LarkChannel——getThreadId 只摸 rawClient.im.v1.message.get 一条链。
 type Channel = Parameters<typeof getThreadId>[0];
 function fakeChannel(get: (...args: unknown[]) => Promise<unknown>): Channel {
   return { rawClient: { im: { v1: { message: { get } } } } } as unknown as Channel;
 }
-const resp = (tid?: string): unknown => ({ data: { items: [tid ? { thread_id: tid } : {}] } });
+const resp = (
+  tid?: string,
+  rootId?: string,
+  parentId?: string,
+): unknown => ({
+  data: {
+    items: [
+      tid
+        ? { thread_id: tid, root_id: rootId, parent_id: parentId }
+        : {},
+    ],
+  },
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -40,6 +52,17 @@ describe('getThreadId 重试（M-5/F8：单次 API 抖动别滞留 pending: 键�
   it('首次即成功：不睡 500ms、只调一次', async () => {
     const get = vi.fn().mockResolvedValue(resp('omt_2'));
     expect(await getThreadId(fakeChannel(get), 'om_x', 3)).toBe('omt_2');
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns thread, root, and direct parent ids from one lookup', async () => {
+    const get = vi.fn().mockResolvedValue(resp('omt_3', 'om_root', 'om_parent'));
+
+    expect(await getMessageRelation(fakeChannel(get), 'om_x', 3)).toEqual({
+      threadId: 'omt_3',
+      rootId: 'om_root',
+      parentId: 'om_parent',
+    });
     expect(get).toHaveBeenCalledTimes(1);
   });
 });

@@ -107,6 +107,7 @@ import {
 } from '../card/context-gauge';
 import { currentLogContext, log, withTrace } from '../core/logger';
 import {
+  applyMessageRelationToAudit,
   buildAuditContext,
   emitMessageCompletedAudit,
   emitTraceStep,
@@ -1010,7 +1011,7 @@ export function createOrchestrator(
       // 必须抢在 handleDmConsole（任意 p2p 消息都会弹菜单卡）之前；命中即不再下传。
       if (cliBridge?.onMessage({
         parentId: msg.replyToMessageId,
-        rootId: msg.threadId,
+        rootId: msg.rootId,
         text: msg.content,
         messageId: msg.messageId,
       })) {
@@ -4647,8 +4648,10 @@ export function createOrchestrator(
 
         const adoptThreadId = async (messageId: string): Promise<void> => {
           if (activeKey.startsWith('pending:')) {
-            const tid = await getThreadId(channel, messageId, 3); // F8: 单次抖动别滞留 pending:
+            const relation = await getMessageRelation(channel, messageId, 3);
+            const tid = relation.threadId;
             if (tid) {
+              applyMessageRelationToAudit(currentTurn.audit, relation);
               // Logical session key = real Feishu topic id + role suffix (when
               // admin/guest tiers are split), so the two roles keep separate
               // threads in the same topic. Feishu reply targeting uses messageId,
@@ -5137,8 +5140,10 @@ export function createOrchestrator(
 
     const adoptThreadId = async (messageId: string, card: RunCardState): Promise<void> => {
       if (activeKey.startsWith('pending:')) {
-        const tid = await getThreadId(channel, messageId, 3); // F8: 单次抖动别滞留 pending:
+        const relation = await getMessageRelation(channel, messageId, 3);
+        const tid = relation.threadId;
         if (tid) {
+          applyMessageRelationToAudit(opts.audit, relation);
           const key = opts.roleSuffix ? `${tid}#${opts.roleSuffix}` : tid;
           active.delete(activeKey);
           active.set(key, state);
@@ -5919,27 +5924,43 @@ export function createOrchestrator(
   return { onMessage, onComment, onBotAddedToChat, onBotRemovedFromChat, onReaction, onBotMenu, dispatcher, adminExecute, shutdown };
 }
 
-/** Resolve a message's thread_id via raw API (reply response omits it). The
+/** Resolve a message's relation via raw API (reply response omits it). The
  * lookup can lag right after the reply, and a single API blip used to leave the
  * run stranded on its `pending:` key（双开 + 孤儿进程，F8）——binding-critical
  * callers pass `attempts` > 1 to retry (500ms apart) before giving up.
  * Exported for tests. */
-export async function getThreadId(
+export async function getMessageRelation(
   channel: LarkChannel,
   messageId: string,
   attempts = 1,
-): Promise<string | undefined> {
+): Promise<import('../core/audit-trace').MessageRelation> {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     if (attempt > 1) await new Promise((r) => setTimeout(r, 500));
     try {
       const res = await channel.rawClient.im.v1.message.get({ path: { message_id: messageId } });
-      const items = (res.data as { items?: { thread_id?: string }[] } | undefined)?.items;
-      const tid = items?.[0]?.thread_id;
-      if (tid) return tid;
+      const items = (res.data as {
+        items?: { thread_id?: string; root_id?: string; parent_id?: string }[];
+      } | undefined)?.items;
+      const item = items?.[0];
+      if (item?.thread_id) {
+        return {
+          threadId: item.thread_id,
+          rootId: item.root_id ?? null,
+          parentId: item.parent_id ?? null,
+        };
+      }
       log.warn('intake', 'threadid-missing', { messageId, attempt });
     } catch (err) {
       log.warn('intake', 'threadid-lookup-failed', { messageId, attempt, err: String(err) });
     }
   }
-  return undefined;
+  return { threadId: null, rootId: null, parentId: null };
+}
+
+export async function getThreadId(
+  channel: LarkChannel,
+  messageId: string,
+  attempts = 1,
+): Promise<string | undefined> {
+  return (await getMessageRelation(channel, messageId, attempts)).threadId ?? undefined;
 }

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
+  applyMessageRelationToAudit,
   buildAuditContext,
   emitMessageCompletedAudit,
   emitTraceStep,
@@ -210,6 +211,8 @@ describe('buildAuditContext', () => {
       msgId: string;
       chatId: string;
       threadId: string | null;
+      rootId: string | null;
+      parentId: string | null;
       senderId: string | null;
     }>();
   });
@@ -220,6 +223,8 @@ describe('buildAuditContext', () => {
         messageId: 'om_1',
         chatId: 'oc_1',
         threadId: 'omt_1',
+        rootId: 'om_root',
+        replyToMessageId: 'om_parent',
         senderId: 'ou_1',
         chatType: 'group',
         mentionedBot: true,
@@ -233,6 +238,8 @@ describe('buildAuditContext', () => {
       msgId: 'om_1',
       chatId: 'oc_1',
       threadId: 'omt_1',
+      rootId: 'om_root',
+      parentId: 'om_parent',
       senderId: 'ou_1',
       chatType: 'group',
       mentionedBot: true,
@@ -255,6 +262,8 @@ describe('buildAuditContext', () => {
       '',
     );
     expect(audit.threadId).toBeNull();
+    expect(audit.rootId).toBeNull();
+    expect(audit.parentId).toBeNull();
     expect(audit.senderId).toBeNull();
   });
 
@@ -281,6 +290,8 @@ describe('buildAuditContext', () => {
         messageId: 'om_core',
         chatId: 'oc_core',
         threadId: 'omt_core',
+        rootId: 'om_root_core',
+        replyToMessageId: 'om_parent_core',
         senderId: 'ou_core',
         chatType: 'group',
         mentionedBot: true,
@@ -291,6 +302,8 @@ describe('buildAuditContext', () => {
         msgId: 'bad-msg',
         chatId: 'bad-chat',
         threadId: 'bad-thread',
+        rootId: 'bad-root',
+        parentId: 'bad-parent',
         senderId: 'bad-sender',
         chatType: 'bad-type',
         mentionedBot: false,
@@ -305,6 +318,8 @@ describe('buildAuditContext', () => {
       msgId: 'om_core',
       chatId: 'oc_core',
       threadId: 'omt_core',
+      rootId: 'om_root_core',
+      parentId: 'om_parent_core',
       senderId: 'ou_core',
       chatType: 'group',
       mentionedBot: true,
@@ -312,6 +327,30 @@ describe('buildAuditContext', () => {
       messageTextTruncated: false,
       receivedAt: '2025-07-04T00:00:00.000Z',
       project: 'demo',
+    });
+  });
+
+  it('backfills the resolved Feishu relation without using a role-suffixed session key', () => {
+    const audit = buildAuditContext(
+      {
+        messageId: 'om_question',
+        chatId: 'oc_topic',
+        chatType: 'group',
+        mentionedBot: true,
+      },
+      'question',
+    );
+
+    applyMessageRelationToAudit(audit, {
+      threadId: 'omt_topic',
+      rootId: 'om_question',
+      parentId: 'om_question',
+    });
+
+    expect(audit).toMatchObject({
+      threadId: 'omt_topic',
+      rootId: 'om_question',
+      parentId: 'om_question',
     });
   });
 });
@@ -516,6 +555,8 @@ describe('emitMessageCompletedAudit', () => {
             msgId: 'audit-msg',
             chatId: 'audit-chat',
             threadId: 'audit-thread',
+            rootId: null,
+            parentId: null,
             senderId: 'audit-sender',
           },
           {
@@ -602,6 +643,8 @@ describe('emitMessageCompletedAudit', () => {
         msgId: 'audit-msg',
         chatId: 'audit-chat',
         threadId: 'audit-thread',
+        rootId: null,
+        parentId: null,
         senderId: 'audit-sender',
       },
       {
@@ -778,6 +821,8 @@ describe('emitMessageCompletedAudit', () => {
         msgId: 'om_no_images',
         chatId: 'oc_no_images',
         threadId: null,
+        rootId: null,
+        parentId: null,
         senderId: null,
       },
       { replyText: 'answer' },
@@ -794,7 +839,14 @@ describe('emitMessageCompletedAudit', () => {
     const workspaceRoot = tempRoot();
     const info = vi.spyOn(log, 'info').mockImplementation(() => undefined);
     emitMessageCompletedAudit(
-      { msgId: 'om_4', chatId: 'oc_4', threadId: null, senderId: null },
+      {
+        msgId: 'om_4',
+        chatId: 'oc_4',
+        threadId: null,
+        rootId: null,
+        parentId: null,
+        senderId: null,
+      },
       { replyText: 'x'.repeat(20_001) },
       { workspaceRoot, now: () => fixedNow },
     );
@@ -835,7 +887,14 @@ describe('best-effort disk handling', () => {
     await expect(artifactSettled).resolves.toBeUndefined();
     expect(() =>
       emitMessageCompletedAudit(
-        { msgId: 'om_1', chatId: 'oc_1', threadId: null, senderId: null },
+        {
+          msgId: 'om_1',
+          chatId: 'oc_1',
+          threadId: null,
+          rootId: null,
+          parentId: null,
+          senderId: null,
+        },
         { replyText: 'hello' },
         { workspaceRoot: invalidRoot, now: () => fixedNow },
       ),
