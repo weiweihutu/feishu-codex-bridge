@@ -92,6 +92,26 @@ export function finalMessageText(state: RunState): string {
   return '';
 }
 
+/**
+ * Replace the FINAL message text (the block {@link finalMessageText} reads) —
+ * Answer Gate enforce 路径用：终态卡渲染前把模型正文换成降级模板或重写来源块。
+ * No matching text block（空回复被降级）→ append one. Returns a new state.
+ */
+export function replaceFinalMessageText(state: RunState, content: string): RunState {
+  for (let i = state.blocks.length - 1; i >= 0; i--) {
+    const b = state.blocks[i];
+    if (b && b.kind === 'text' && b.content.trim()) {
+      const next = [...state.blocks];
+      next[i] = { ...b, content, streaming: false };
+      return { ...state, blocks: next };
+    }
+  }
+  return {
+    ...state,
+    blocks: [...state.blocks, { kind: 'text', id: 'answer-gate', content, streaming: false }],
+  };
+}
+
 function closeStreamingText(blocks: Block[]): Block[] {
   return blocks.map((b) => (b.kind === 'text' && b.streaming ? { ...b, streaming: false } : b));
 }

@@ -66,6 +66,10 @@ export interface Project {
   /** 本项目新话题的默认推理强度。仅当所选 {@link defaultModel} 支持该 effort 时生效，
    * 否则回落该模型的 defaultEffort（claude 等不调 effort 的后端忽略）。 */
   defaultEffort?: ReasoningEffort;
+  /** 项目级兜底值班人 open_id：回复被判"需人工"（[NEED_HUMAN] / Answer Gate
+   * 降级）时在话题内 @ 此人。缺省 = 不 @（只发降级文案）。运维属性，直接编辑
+   * projects.json 生效，不走模板生成链路。 */
+  escalationOpenId?: string;
 }
 
 /**

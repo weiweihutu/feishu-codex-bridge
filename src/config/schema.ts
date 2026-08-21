@@ -63,6 +63,30 @@ export interface ResolvedCompletionReminderConfig {
   longTaskMinutes: number;
 }
 
+/** Answer Gate（防编造门禁）模式：off=不判定；log-only=判定只记审计；enforce=降级替换正文。 */
+export type AnswerGateMode = 'off' | 'log-only' | 'enforce';
+
+/** Answer Gate 偏好（config.json preferences.answerGate）。规则开关缺省为开。 */
+export interface AnswerGateConfig {
+  mode?: AnswerGateMode;
+  /** 逐规则灰度开关（G1 知识无命中 / G2 实时无证据 / G3 零工具调用 / G4 该追问未追问）。 */
+  rules?: { g1?: boolean; g2?: boolean; g3?: boolean; g4?: boolean };
+}
+
+export function getAnswerGateMode(cfg: AppConfig): AnswerGateMode {
+  const raw = cfg.preferences?.answerGate?.mode;
+  return raw === 'log-only' || raw === 'enforce' ? raw : 'off';
+}
+
+export function getAnswerGateRules(cfg: AppConfig): {
+  g1?: boolean;
+  g2?: boolean;
+  g3?: boolean;
+  g4?: boolean;
+} {
+  return cfg.preferences?.answerGate?.rules ?? {};
+}
+
 export const COMPLETION_REMINDER_LONG_TASK_MIN_MINUTES = 1;
 export const COMPLETION_REMINDER_LONG_TASK_MAX_MINUTES = 1440;
 export const COMPLETION_REMINDER_LONG_TASK_DEFAULT_MINUTES = 3;
@@ -110,6 +134,8 @@ export interface AppPreferences {
   pendingPolicy?: PendingPolicy;
   /** 普通群任务的结束提醒；默认只在失败或假死超时时发送。 */
   completionReminder?: CompletionReminderConfig;
+  /** 防编造回复门禁（Evidence Ledger + Answer Gate）。缺省 off，零行为变化。 */
+  answerGate?: AnswerGateConfig;
   /** groups require @bot to respond. Default true. */
   requireMentionInGroup?: boolean;
   /** access control — see AppAccess. */

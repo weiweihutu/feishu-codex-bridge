@@ -43,6 +43,8 @@ import {
   getCommentsConfig,
   getCompletionReminderConfig,
   shouldShowCompletionReminderButton,
+  getAnswerGateMode,
+  getAnswerGateRules,
   isAdmin,
   isChatAllowed,
   isUserAllowedInProject,
@@ -65,7 +67,7 @@ import {
 import { CardDispatcher } from '../card/dispatcher';
 import { sendManagedCard, updateManagedCard } from '../card/managed';
 import { RunRender } from '../card/run-render';
-import { finalMessageText, initialState, reduce, type RunState } from '../card/run-state';
+import { finalMessageText, initialState, reduce, replaceFinalMessageText, type RunState } from '../card/run-state';
 import {
   buildClearedCard,
   buildHelpCard,
@@ -116,6 +118,9 @@ import {
   type AuditContext,
 } from '../core/audit-trace';
 import { parseReplyPresentation } from '../core/reply-visibility';
+import { EvidenceLedger } from '../core/evidence-ledger';
+import { applyAnswerGate } from '../core/answer-gate';
+import { sendEscalationNotice } from './escalation';
 import { appendFeishuContext, shouldRespondWithoutMention } from './feishu-message-policy';
 import {
   buildAddAdminCard,
@@ -520,8 +525,18 @@ export function settleOrdinaryTurnRender(
   }
 }
 
+/** Answer Gate 审计附件（方案 9.1）：随 message_completed 落日志，采集入 MySQL。 */
+export interface GateAuditFields {
+  gateDecision: string;
+  gateRule: string | null;
+  gateReasonsJson: string;
+  evidenceLedgerJson: string;
+  /** enforce 且正文被替换时的模型原文；未替换为 undefined。 */
+  originalReplyText?: string;
+}
+
 type OrdinaryTurnCompletion =
-  | { kind: 'success'; runState: RunState; images: number; model?: string }
+  | { kind: 'success'; runState: RunState; images: number; model?: string; gate?: GateAuditFields }
   | { kind: 'error'; error: unknown; images: number; model?: string };
 
 export function emitOrdinaryTurnCompletion(
@@ -553,6 +568,17 @@ export function emitOrdinaryTurnCompletion(
         visibleReplyText: presentation.visibleText,
         replyMetadata: presentation.metadata,
         textChars: replyText.length,
+        ...(completion.gate
+          ? {
+              gateDecision: completion.gate.gateDecision,
+              gateRule: completion.gate.gateRule,
+              gateReasonsJson: completion.gate.gateReasonsJson,
+              evidenceLedgerJson: completion.gate.evidenceLedgerJson,
+              ...(completion.gate.originalReplyText !== undefined
+                ? { originalReplyText: completion.gate.originalReplyText }
+                : {}),
+            }
+          : {}),
       });
     } else {
       emit(turn.audit, {
@@ -1776,6 +1802,7 @@ export function createOrchestrator(
           requesterOpenId: msg.senderId,
           requestedAt: msg.createTime || tIntake,
           ...(!goal ? { audit: intakeAudit } : {}),
+          project,
           // 编织完成 → turn/start 之间不再读盘：首轮直接用预取的会话记录
           // （prior=undefined 即确知是全新会话，刚 upsert 的记录还没有 model）。
           firstRec: prior ?? null,
@@ -2041,6 +2068,7 @@ export function createOrchestrator(
         requesterOpenId: msg.senderId,
         requestedAt: msg.createTime || tIntake,
         ...(!goal ? { audit: intakeAudit } : {}),
+        project,
         roleSuffix: perm.roleSuffix,
         backendId: be.id,
         titleJobKey,
@@ -4371,6 +4399,8 @@ export function createOrchestrator(
     timing?: { tResolve: number; tWeave: number };
     /** Audit is attached only to ordinary message turns, never goals/comments. */
     audit?: AuditContext;
+    /** 本群绑定的项目记录（Answer Gate 的 system 名与 escalation 值班人来源）。 */
+    project?: Project;
   }
 
   /** The queue placeholder card's CardKit entity, handed to the run for in-place
@@ -4763,7 +4793,11 @@ export function createOrchestrator(
         let evCount = 0;
         let textChars = 0;
         const toolStartedAt = new Map<string, number>();
+        // Evidence Ledger（防编造门禁）：随事件流进程内记账 gbrain / Skill /
+        // router 声明，收尾时供 Answer Gate 判定。observe 永不抛错。
+        const evidenceLedger = new EvidenceLedger();
         for await (const ev of guarded) {
+          evidenceLedger.observe(ev);
           const tEv = Date.now();
           if (!firstEvAt) firstEvAt = tEv;
           const et = (ev as { type?: string }).type;
@@ -4874,6 +4908,57 @@ export function createOrchestrator(
           });
         }
 
+        // ── Answer Gate（防编造门禁）── 终态判定 + 按模式改写正文。仅正常完成
+        // 的普通消息轮参与（interrupted / killed / error 有各自的终态文案）；
+        // off 模式零行为变化。enforce 且被降级时终态卡直接渲染降级正文——
+        // 流式期间用户已看到的原文属于已知边界（方案 7.4 的正文缓冲后续切）。
+        let gateAudit: GateAuditFields | undefined;
+        try {
+          const gateMode = getAnswerGateMode(cfg);
+          if (gateMode !== 'off' && currentTurn.audit && rc.rs.terminal === 'done' && !interrupted) {
+            const snapshot = evidenceLedger.snapshot();
+            const gate = applyAnswerGate({
+              replyText: finalMessageText(rc.rs),
+              snapshot,
+              mode: gateMode,
+              rules: getAnswerGateRules(cfg),
+              system: opts.project?.name ?? String(currentTurn.audit.project ?? '(unregistered)'),
+            });
+            gateAudit = {
+              gateDecision: gate.decision,
+              gateRule: gate.rule,
+              gateReasonsJson: JSON.stringify(gate.reasons),
+              evidenceLedgerJson: JSON.stringify(snapshot),
+              ...(gate.originalReplyText !== null ? { originalReplyText: gate.originalReplyText } : {}),
+            };
+            log.info('agent', 'answer-gate', {
+              mode: gateMode,
+              decision: gate.decision,
+              rule: gate.rule,
+              replaced: gate.replaced,
+              gbrainCalls: snapshot.gbrainCalls.length,
+              skillCalls: snapshot.skillCalls.length,
+              intent: snapshot.routerDecision?.intent ?? 'unknown',
+            });
+            if (gateMode === 'enforce' && gate.replaced) {
+              rc.rs = replaceFinalMessageText(rc.rs, gate.finalReplyText);
+            }
+            // 需人工 → 话题内 @ 项目值班人（best-effort）。模型自判 [NEED_HUMAN]（G5）
+            // 是诚实声明，与 Gate 模式无关——log-only 下同样通知，让"答不了"的
+            // 问题立刻有人接手；enforce 降级产生的 needHuman 也走同一路径。
+            if (gate.needHuman && opts.project?.escalationOpenId) {
+              void sendEscalationNotice(channel, {
+                cardMsgId,
+                escalationOpenId: opts.project.escalationOpenId,
+                summary: currentTurn.summary,
+                replyInThread: !opts.flat,
+              });
+            }
+          }
+        } catch (err) {
+          log.fail('agent', err, { phase: 'answer-gate' }); // 门禁异常绝不拖死收尾
+        }
+
         const finalMsgId = cardMsgId;
         await adoptThreadId(finalMsgId);
         rc.cardKey = finalMsgId;
@@ -4973,6 +5058,7 @@ export function createOrchestrator(
           runState: rc.rs,
           images: rc.images?.size ?? 0,
           model: turnModel,
+          gate: gateAudit,
         });
 
         // A stop (⏹ graceful or forced / watchdog) or a dead process ends the
