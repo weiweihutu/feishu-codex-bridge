@@ -10,7 +10,7 @@ import { log } from '../core/logger';
 export interface EscalationNoticeInput {
   /** 话题内锚点消息（run 卡）。 */
   cardMsgId: string;
-  escalationOpenId: string;
+  escalationOpenId: string | string[];
   /** 用户原始问题摘要（截断后进通知正文）。 */
   summary?: string;
   replyInThread: boolean;
@@ -23,12 +23,15 @@ function compact(text: string | undefined, limit = 60): string {
 }
 
 export function buildEscalationContent(input: Pick<EscalationNoticeInput, 'escalationOpenId' | 'summary'>): string {
+  const escalationOpenIds = Array.isArray(input.escalationOpenId)
+    ? input.escalationOpenId
+    : [input.escalationOpenId];
   return JSON.stringify({
     zh_cn: {
       title: '',
       content: [
         [
-          { tag: 'at', user_id: input.escalationOpenId },
+          ...escalationOpenIds.map((user_id) => ({ tag: 'at' as const, user_id })),
           { tag: 'text', text: ` 🙋「${compact(input.summary)}」机器人未能给出可靠答案，需人工跟进。` },
         ],
         [{ tag: 'text', text: '详情见上方卡片；处理后请在卡片上反馈结果。' }],
@@ -50,7 +53,9 @@ export async function sendEscalationNotice(
         reply_in_thread: input.replyInThread,
       },
     });
-    log.info('card', 'escalation-notice', { to: input.escalationOpenId });
+    log.info('card', 'escalation-notice', {
+      to: Array.isArray(input.escalationOpenId) ? input.escalationOpenId : [input.escalationOpenId],
+    });
     return 'sent';
   } catch (err) {
     log.fail('card', err, { phase: 'escalation-notice' });

@@ -69,7 +69,13 @@ export interface Project {
   /** 项目级兜底值班人 open_id：回复被判"需人工"（[NEED_HUMAN] / Answer Gate
    * 降级）时在话题内 @ 此人。缺省 = 不 @（只发降级文案）。运维属性，直接编辑
    * projects.json 生效，不走模板生成链路。 */
-  escalationOpenId?: string;
+  escalationOpenId?: string | string[];
+}
+
+/** Normalize legacy single-owner configuration and remove blank/duplicate IDs. */
+export function normalizeEscalationOpenIds(value: string | string[] | undefined): string[] {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return Array.from(new Set(values.map((id) => id.trim()).filter(Boolean)));
 }
 
 /**

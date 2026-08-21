@@ -195,6 +195,7 @@ import {
   getProjectByChatId,
   getProjectByName,
   listProjects,
+  normalizeEscalationOpenIds,
   removeProject,
   turnTier,
   updateProject,
@@ -476,6 +477,28 @@ export function buildReplyReview(
 /** Review actions deliberately have no administrator override. */
 export function canResolveReply(operatorOpenId?: string, requesterOpenId?: string): boolean {
   return Boolean(operatorOpenId && requesterOpenId && operatorOpenId === requesterOpenId);
+}
+
+/** Review permissions are intentionally action-specific. */
+export function canActOnReplyReview(
+  action: string,
+  operatorOpenId?: string,
+  requesterOpenId?: string,
+  escalationOpenId?: string | string[],
+): boolean {
+  if (!operatorOpenId || !requesterOpenId) return false;
+  const escalationOpenIds = normalizeEscalationOpenIds(escalationOpenId);
+  if (action === RR.resolve) {
+    return operatorOpenId === requesterOpenId || escalationOpenIds.includes(operatorOpenId);
+  }
+  if (
+    action === RR.unresolvedOpen ||
+    action === RR.unresolvedSubmit ||
+    action === RR.unresolvedCancel
+  ) {
+    return escalationOpenIds.includes(operatorOpenId);
+  }
+  return false;
 }
 
 /** Normalize feedback defensively even though the card input already enforces 1000 chars. */
@@ -2525,12 +2548,14 @@ export function createOrchestrator(
     const review = reviewRoute(value);
     const operatorId = evt.operator?.openId ?? '';
     if (!runAllowed(evt) || !review.msgId || !review.requesterId) return undefined;
-    if (canResolveReply(operatorId, review.requesterId)) return review;
-    log.info('card', 'action-denied', { actionId, reason: 'not-requester' });
+    const project = await getProjectByChatId(evt.chatId);
+    if (canActOnReplyReview(actionId, operatorId, review.requesterId, project?.escalationOpenId)) return review;
+    const allowed = actionId === RR.resolve ? '问题发起人或系统负责人' : '系统负责人';
+    log.info('card', 'action-denied', { actionId, reason: 'not-authorized' });
     await channel
       .send(
         evt.chatId,
-        { markdown: '⚠️ 仅问题发起人可以操作本次回复反馈。' },
+        { markdown: `⚠️ 仅${allowed}可以操作本次回复反馈。` },
         { replyTo: evt.messageId, replyInThread: true },
       )
       .catch(() => undefined);
@@ -2615,14 +2640,35 @@ export function createOrchestrator(
         return;
       }
       if (stored.rc.review.status !== 'unresolved-form') return;
+      if (stored.rc.review.feedbackSending) return;
       const feedback = normalizeReplyReviewFeedback(formValue?.feedback);
       if (!feedback) {
         log.info('card', 'review-feedback-invalid', { cardMsgId: evt.messageId, reason: 'empty' });
         return;
       }
+      stored.rc.review.feedbackSending = true;
+      try {
+        await channel.send(
+          evt.chatId,
+          { markdown: feedback },
+          { replyTo: review.msgId, replyInThread: true },
+        );
+      } catch (err) {
+        delete stored.rc.review.feedbackSending;
+        log.fail('card', err, { phase: 'reply-review-feedback-send', msgId: review.msgId });
+        await channel
+          .send(
+            evt.chatId,
+            { markdown: '⚠️ 人工回复发送失败，请稍后重试。' },
+            { replyTo: evt.messageId, replyInThread: true },
+          )
+          .catch(() => undefined);
+        return;
+      }
       stored.rc.review.status = 'unresolved';
       stored.rc.review.revision += 1;
       stored.rc.review.feedback = feedback;
+      delete stored.rc.review.feedbackSending;
       const operatedAt = new Date().toISOString();
       withTrace({ chatId: evt.chatId, msgId: review.msgId }, () => {
         log.info(

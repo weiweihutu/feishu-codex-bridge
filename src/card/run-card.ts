@@ -69,6 +69,8 @@ export interface ReplyReviewState {
   /** Changes on every transition so the SDK does not deduplicate later clicks. */
   revision: number;
   feedback?: string;
+  /** Prevent duplicate manual replies while a Feishu send is in flight. */
+  feedbackSending?: boolean;
 }
 
 function reviewActionValue(review: ReplyReviewState, action: string): ActionValue {
