@@ -73,6 +73,36 @@ export interface AnswerGateConfig {
   rules?: { g1?: boolean; g2?: boolean; g3?: boolean; g4?: boolean };
 }
 
+export interface ReplyReviewConfig {
+  problemCategories?: string[];
+}
+
+export const DEFAULT_REPLY_REVIEW_CATEGORIES = [
+  '知识库无相关内容',
+  '知识库命中不准确',
+  '知识库内容过期',
+  '缺少查数据skill',
+  '工具调用失败',
+  '分系统意图识别错误',
+  '超出系统边界',
+  '用户提法不明确',
+  '用户提供信息不全',
+  '图片或附件识别失败',
+  'Agent表达不符要求',
+  'Agent无权限操作',
+  'Agent编造',
+] as const;
+
+export function getReplyReviewCategories(cfg: AppConfig): string[] {
+  const configured = cfg.preferences?.replyReview?.problemCategories;
+  if (!Array.isArray(configured)) return [...DEFAULT_REPLY_REVIEW_CATEGORIES];
+  const categories = configured
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return categories.length > 0 ? [...new Set(categories)] : [...DEFAULT_REPLY_REVIEW_CATEGORIES];
+}
+
 export function getAnswerGateMode(cfg: AppConfig): AnswerGateMode {
   const raw = cfg.preferences?.answerGate?.mode;
   return raw === 'log-only' || raw === 'enforce' ? raw : 'off';
@@ -136,6 +166,7 @@ export interface AppPreferences {
   completionReminder?: CompletionReminderConfig;
   /** 防编造回复门禁（Evidence Ledger + Answer Gate）。缺省 off，零行为变化。 */
   answerGate?: AnswerGateConfig;
+  replyReview?: ReplyReviewConfig;
   /** groups require @bot to respond. Default true. */
   requireMentionInGroup?: boolean;
   /** access control — see AppAccess. */

@@ -3,6 +3,7 @@ import {
   buildReplyReview,
   buildReplyReviewAuditFields,
   canActOnReplyReview,
+  normalizeReplyReviewCategory,
   normalizeReplyReviewFeedback,
 } from '../src/bot/handle-message';
 import { normalizeEscalationOpenIds } from '../src/project/registry';
@@ -32,6 +33,11 @@ describe('reply review feedback', () => {
     expect(normalizeReplyReviewFeedback({ text: 'invalid' })).toBeUndefined();
   });
 
+  it('accepts only configured problem categories', () => {
+    expect(normalizeReplyReviewCategory(' 工具调用失败 ', ['工具调用失败'])).toBe('工具调用失败');
+    expect(normalizeReplyReviewCategory('其他问题', ['工具调用失败'])).toBeUndefined();
+  });
+
   it('builds structured unresolved audit fields with topic and actor identity', () => {
     expect(
       buildReplyReviewAuditFields({
@@ -51,6 +57,7 @@ describe('reply review feedback', () => {
       action: 'unresolved',
       decision: 'not_adopted',
       feedback: '缺少部署失败原因',
+      badcaseType: '',
       threadId: 'omt_topic',
       cardMsgId: 'om_card',
       requesterId: 'ou_requester',

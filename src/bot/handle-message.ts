@@ -45,6 +45,7 @@ import {
   shouldShowCompletionReminderButton,
   getAnswerGateMode,
   getAnswerGateRules,
+  getReplyReviewCategories,
   isAdmin,
   isChatAllowed,
   isUserAllowedInProject,
@@ -508,6 +509,15 @@ export function normalizeReplyReviewFeedback(value: unknown): string | undefined
   return feedback || undefined;
 }
 
+export function normalizeReplyReviewCategory(
+  value: unknown,
+  categories: readonly string[],
+): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const category = value.trim();
+  return category && categories.includes(category) ? category : undefined;
+}
+
 export function buildReplyReviewAuditFields(opts: {
   review: ReplyReviewState;
   cardMsgId: string;
@@ -518,6 +528,7 @@ export function buildReplyReviewAuditFields(opts: {
     action: 'unresolved',
     decision: 'not_adopted',
     feedback: opts.review.feedback ?? '',
+    badcaseType: opts.review.problemCategory ?? '',
     threadId: opts.review.threadId,
     cardMsgId: opts.cardMsgId,
     requesterId: opts.review.requesterId,
@@ -2646,6 +2657,14 @@ export function createOrchestrator(
         log.info('card', 'review-feedback-invalid', { cardMsgId: evt.messageId, reason: 'empty' });
         return;
       }
+      const problemCategory = normalizeReplyReviewCategory(
+        formValue?.problem_category,
+        getReplyReviewCategories(cfg),
+      );
+      if (!problemCategory) {
+        log.info('card', 'review-category-invalid', { cardMsgId: evt.messageId, reason: 'missing-or-unknown' });
+        return;
+      }
       stored.rc.review.feedbackSending = true;
       try {
         await channel.send(
@@ -2668,6 +2687,7 @@ export function createOrchestrator(
       stored.rc.review.status = 'unresolved';
       stored.rc.review.revision += 1;
       stored.rc.review.feedback = feedback;
+      stored.rc.review.problemCategory = problemCategory;
       delete stored.rc.review.feedbackSending;
       const operatedAt = new Date().toISOString();
       withTrace({ chatId: evt.chatId, msgId: review.msgId }, () => {
@@ -4714,6 +4734,7 @@ export function createOrchestrator(
           rs: render.snapshot(),
           requesterOpenId: currentTurn.requesterOpenId,
           review: buildReplyReview(currentTurn.audit, currentTurn.requesterOpenId),
+          problemCategories: getReplyReviewCategories(cfg),
           showTools: false,
           completionReminder: completionReminderView(state),
           // 模型显示档位：footnote 本轮 model·推理强度；always 档终态卡也保留。

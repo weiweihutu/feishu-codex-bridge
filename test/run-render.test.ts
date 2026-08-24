@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { mapNotification } from '../src/agent/codex-appserver/event-map';
 import type { ServerNotification, ThreadItem } from '../src/agent/codex-appserver/protocol';
 import type { AgentEvent } from '../src/agent/types';
-import { buildRunCard, buildRunCardWithoutReview, RC, RR } from '../src/card/run-card';
+import {
+  buildRunCard,
+  buildRunCardWithoutReview,
+  completionSummary,
+  RC,
+  RR,
+} from '../src/card/run-card';
 import {
   initialState,
   markIdleTimeout,
@@ -239,6 +245,49 @@ describe('buildRunCard — fatal error advice', () => {
 });
 
 describe('buildRunCard', () => {
+  it('uses up to two visible answer lines as the terminal preview summary', () => {
+    const rs = run([
+      {
+        type: 'text',
+        itemId: 'answer',
+        text: [
+          '结论：第一行提供关键结论，内容较长时需要在摘要中截断，避免预览过宽。',
+          '',
+          '建议：第二行给出下一步操作。',
+          '来源：知识库',
+          '系统：OMS',
+        ].join('\n'),
+      },
+      { type: 'done', turnId: 'turn-summary' },
+    ]);
+
+    expect(completionSummary(rs)).toBe(
+      '结论：第一行提供关键结论，内容较长时需要在摘要中截断，避免预览过宽。\n建议：第二行给出下一步操作。',
+    );
+    expect(JSON.stringify(buildRunCard({ rs }))).not.toContain('来源：知识库');
+  });
+
+  it('truncates an individual preview line and falls back for an empty answer', () => {
+    const long = '结论：' + '很长的摘要内容'.repeat(30);
+    const rs = run([
+      { type: 'text', itemId: 'answer', text: long },
+      { type: 'done', turnId: 'turn-summary-long' },
+    ]);
+    const summary = completionSummary(rs);
+
+    expect(summary).toBeDefined();
+    expect(summary!.split('\n')).toHaveLength(1);
+    expect(summary!.length).toBe(81);
+    expect(summary!.endsWith('…')).toBe(true);
+    expect(
+      JSON.stringify(
+        buildRunCard({
+          rs: run([{ type: 'done', turnId: 'turn-summary-empty' }]),
+        }),
+      ),
+    ).toContain('已完成');
+  });
+
   it('hides terminal provenance metadata from running and completed cards', () => {
     const reply = [
       '结论：需要核对平台映射。',

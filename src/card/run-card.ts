@@ -9,6 +9,7 @@ import {
   md,
   mdStream,
   noteMd,
+  selectMenu,
   splitRow,
   submitButton,
   type ActionValue,
@@ -28,6 +29,7 @@ import { visibleReplyText } from '../core/reply-visibility';
 import { renderRichText } from './markdown-render';
 import { toolBodyMd, toolHeaderText, toolSummaryLine } from './tool-render';
 import { runCardGauge } from './context-gauge';
+import { DEFAULT_REPLY_REVIEW_CATEGORIES } from '../config/schema';
 
 /** The context-usage gauge line, only at/above the warn tier (else null). */
 function gaugeEl(state: RunState): CardElement | null {
@@ -55,9 +57,13 @@ const RESOLVED_BUTTON_TEXT = '✅已解决';
 const UNRESOLVED_BUTTON_TEXT = '❌未解决';
 const REVIEW_ACTION_EID = 'review_action';
 const REVIEW_FEEDBACK_FORM = 'reply_feedback';
+const REVIEW_CATEGORY_INPUT = 'problem_category';
 const REVIEW_FEEDBACK_INPUT = 'feedback';
 
 export type ReplyReviewStatus = 'pending' | 'unresolved-form' | 'resolved' | 'unresolved';
+
+export const REPLY_REVIEW_CATEGORIES = DEFAULT_REPLY_REVIEW_CATEGORIES;
+export type ReplyReviewCategory = string;
 
 export interface ReplyReviewState {
   /** Inbound user-message id; first-turn reviews associate through this field. */
@@ -69,6 +75,7 @@ export interface ReplyReviewState {
   /** Changes on every transition so the SDK does not deduplicate later clicks. */
   revision: number;
   feedback?: string;
+  problemCategory?: ReplyReviewCategory;
   /** Prevent duplicate manual replies while a Feishu send is in flight. */
   feedbackSending?: boolean;
 }
@@ -83,7 +90,7 @@ function reviewActionValue(review: ReplyReviewState, action: string): ActionValu
   };
 }
 
-function reviewElements(review: ReplyReviewState): CardElement[] {
+function reviewElements(review: ReplyReviewState, categories: readonly string[]): CardElement[] {
   if (review.status === 'resolved') return [{ tag: 'markdown', content: '✅ 已解决' }];
   if (review.status === 'unresolved') {
     return [{ tag: 'markdown', content: '❌ 未解决反馈已记录' }];
@@ -91,6 +98,11 @@ function reviewElements(review: ReplyReviewState): CardElement[] {
   if (review.status === 'unresolved-form') {
     return [
       form(REVIEW_FEEDBACK_FORM, [
+        selectMenu({
+          name: REVIEW_CATEGORY_INPUT,
+          placeholder: '请选择问题分类',
+          options: categories.map((category) => ({ label: category, value: category })),
+        }),
         input({
           name: REVIEW_FEEDBACK_INPUT,
           label: '人工回复',
@@ -164,6 +176,8 @@ const PROCESS_COMPONENT_BUDGET = 120;
 /** Byte cap on the batched summary's markdown body (one element, well under the
  * ~30KB per-element limit); over it the tail is dropped with a visible count. */
 const SUMMARY_BODY_MAX = 6000;
+const SUMMARY_MAX_LINES = 2;
+const SUMMARY_LINE_MAX = 80;
 
 /** Routing + render inputs for one run card. */
 export interface RunCardState {
@@ -205,6 +219,8 @@ export interface RunCardState {
   images?: ReadonlyMap<string, string>;
   /** Requester-only accuracy review action for a successful ordinary reply. */
   review?: ReplyReviewState;
+  /** Dynamic problem categories for the review form. */
+  problemCategories?: readonly string[];
 }
 
 /**
@@ -383,7 +399,7 @@ function renderTerminal(state: RunState, rc: RunCardState): CardElement[] {
   const mEl = rc.modelOnTerminal ? modelEl(rc) : null;
   if (mEl) elements.push(mEl);
   if (state.terminal === 'done' && answer && rc.review) {
-    elements.push(...reviewElements(rc.review));
+    elements.push(...reviewElements(rc.review, rc.problemCategories ?? REPLY_REVIEW_CATEGORIES));
   }
 
   return elements;
@@ -697,11 +713,29 @@ function modelEl(rc: RunCardState): CardElement | null {
   };
 }
 
+export function completionSummary(state: RunState): string | undefined {
+  if (state.terminal !== 'done') return undefined;
+  const answerIdx = lastTextIndex(state.blocks);
+  if (answerIdx < 0) return undefined;
+
+  const answer = visibleReplyText(
+    (state.blocks[answerIdx] as Extract<Block, { kind: 'text' }>).content,
+    'terminal',
+  );
+  const lines = answer
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, SUMMARY_MAX_LINES)
+    .map((line) => truncate(line, SUMMARY_LINE_MAX));
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
 function summaryText(state: RunState): string {
   if (state.terminal === 'interrupted') return '已中断';
   if (state.terminal === 'idle_timeout') return '已超时';
   if (state.terminal === 'error') return '出错';
-  if (state.terminal === 'done') return '已完成';
+  if (state.terminal === 'done') return completionSummary(state) ?? '已完成';
   if (state.footer === 'tool_running') return '正在调用工具';
   if (state.footer === 'streaming') return '正在输出';
   if (state.footer === 'retrying') return '自动重试中';
