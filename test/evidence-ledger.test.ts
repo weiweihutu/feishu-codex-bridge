@@ -50,6 +50,23 @@ describe('parseRouterDecision', () => {
     expect(d.knowledgeSources).toEqual(['oms-business-wiki']);
   });
 
+  it('preserves terminal, precheck, and reason fields from the router contract', () => {
+    const d = parseRouterDecision(
+      'ROUTER_DECISION: {"intent":"clarify","terminal":true,"allowed_next_action":"ask_clarification","knowledge_precheck":{"status":"not_configured","completed":false},"missing_params":[],"reason":"知识库预检索未完成"}',
+    )!;
+    expect(d).toMatchObject({
+      intent: 'clarify',
+      terminal: true,
+      allowedNextAction: 'ask_clarification',
+      missingParams: [],
+      reason: '知识库预检索未完成',
+      knowledgePrecheck: {
+        status: 'not_configured',
+        completed: false,
+      },
+    });
+  });
+
   it('maps unknown intent values to unknown, missing line to null', () => {
     expect(parseRouterDecision('ROUTER_DECISION: {"intent":"weird"}')!.intent).toBe('unknown');
     expect(parseRouterDecision('no line here')).toBeNull();
@@ -68,6 +85,32 @@ describe('parseSkillEvidence', () => {
     expect(calls).toHaveLength(2);
     expect(calls[0]).toMatchObject({ skillId: 'bsq-oms-order', status: 'success_data', recordCount: 3 });
     expect(calls[1]!.status).toBe('unknown');
+  });
+
+  it('parses structured validation details from Skill evidence', () => {
+    const calls = parseSkillEvidence(
+      'SKILL_EVIDENCE: {"skill_id":"bsq-ops-sales-performance","status":"validation_error","operation":"queryAsinStationSales","missing_params":[{"key":"searchBeginTime","label":"查询开始时间","type":"Date","format":"YYYY-MM-DD"},{"key":"searchEndTime","label":"查询结束时间","type":"Date","format":"YYYY-MM-DD"}],"message":"缺少查询开始时间、查询结束时间"}',
+    );
+    expect(calls).toEqual([
+      {
+        skillId: 'bsq-ops-sales-performance',
+        status: 'validation_error',
+        recordCount: null,
+        operation: 'queryAsinStationSales',
+        missingParams: [
+          { key: 'searchBeginTime', label: '查询开始时间', type: 'Date', format: 'YYYY-MM-DD' },
+          { key: 'searchEndTime', label: '查询结束时间', type: 'Date', format: 'YYYY-MM-DD' },
+        ],
+        message: '缺少查询开始时间、查询结束时间',
+      },
+    ]);
+  });
+
+  it('keeps legacy string missing parameters compatible', () => {
+    const calls = parseSkillEvidence(
+      'SKILL_EVIDENCE: {"skill_id":"bsq-oms-order","status":"validation_error","missing_params":["startTime","endTime"]}',
+    );
+    expect(calls[0]?.missingParams).toEqual([{ key: 'startTime' }, { key: 'endTime' }]);
   });
 });
 
@@ -106,6 +149,9 @@ describe('EvidenceLedger', () => {
     // G6: undeclared hit is excluded from effective evidence
     expect(effectiveGbrainHits(snap)).toHaveLength(1);
     expect(snap.otherToolCalls).toBe(0); // router line does not count as "other"
+    expect((snap.executionTrace ?? []).map((item) => item.kind)).toEqual([
+      'router', 'gbrain', 'gbrain', 'gbrain',
+    ]);
   });
 
   it('books skill evidence lines and counts other tools', () => {
@@ -126,6 +172,21 @@ describe('EvidenceLedger', () => {
     ledger.observe(gbrainUse('g1', 'anything-wiki'));
     ledger.observe(gbrainResult('g1', mcpEnvelope([{}])));
     expect(ledger.snapshot().gbrainCalls[0]!.undeclaredSource).toBe(false);
+  });
+
+  it('keeps terminal router state available for downstream answer gating', () => {
+    const ledger = new EvidenceLedger();
+    for (const ev of shellResult(
+      'r1',
+      'ROUTER_DECISION: {"intent":"clarify","terminal":true,"allowed_next_action":"ask_clarification","knowledge_precheck":{"status":"not_configured","completed":false},"missing_params":[],"reason":"知识库预检索未完成"}',
+    )) {
+      ledger.observe(ev);
+    }
+    expect(ledger.snapshot().routerDecision).toMatchObject({
+      intent: 'clarify',
+      terminal: true,
+      knowledgePrecheck: { status: 'not_configured', completed: false },
+    });
   });
 });
 

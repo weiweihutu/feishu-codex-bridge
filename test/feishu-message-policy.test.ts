@@ -112,6 +112,23 @@ describe('shouldRespondWithoutMention', () => {
     })).toBe(false);
   });
 
+  it('accepts a configured escalation mention even when the bot is not mentioned', () => {
+    const project = {
+      kind: 'multi',
+      noMention: false,
+      defaultNoMention: false,
+      escalationOpenIds: ['ou_owner_1', 'ou_owner_2'],
+    } as const;
+    expect(shouldRespondWithoutMention(project, {
+      ...ordinaryMessage,
+      mentions: [{ openId: 'ou_owner_2', isBot: false }],
+    })).toBe(true);
+    expect(shouldRespondWithoutMention(project, {
+      ...ordinaryMessage,
+      mentions: [{ openId: 'ou_other', isBot: false }],
+    })).toBe(false);
+  });
+
   it('accepts an existing-thread message under the same enabled policy', () => {
     expect(shouldRespondWithoutMention({
       kind: 'multi',

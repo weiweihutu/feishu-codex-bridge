@@ -595,12 +595,30 @@ export function emitOrdinaryTurnCompletion(
     if (completion.kind === 'success') {
       const replyText = finalMessageText(completion.runState);
       const presentation = parseReplyPresentation(replyText);
+      const replyMetadata =
+        completion.gate
+          ? {
+              ...(presentation.metadata ?? {}),
+              routing_evidence: {
+                ...(typeof presentation.metadata?.routing_evidence === 'object' &&
+                presentation.metadata.routing_evidence !== null
+                  ? presentation.metadata.routing_evidence
+                  : {}),
+                answer_gate: {
+                  decision: completion.gate.gateDecision,
+                  rule: completion.gate.gateRule,
+                  reasons: JSON.parse(completion.gate.gateReasonsJson),
+                },
+                evidence_ledger: JSON.parse(completion.gate.evidenceLedgerJson),
+              },
+            }
+          : presentation.metadata;
       emit(turn.audit, {
         ...common,
         terminal: completion.runState.terminal,
         replyText: presentation.fullText,
         visibleReplyText: presentation.visibleText,
-        replyMetadata: presentation.metadata,
+        replyMetadata,
         textChars: replyText.length,
         ...(completion.gate
           ? {
@@ -1093,6 +1111,7 @@ export function createOrchestrator(
             kind: project.kind,
             noMention: project.noMention,
             defaultNoMention: defaultNoMention(project),
+            escalationOpenIds: normalizeEscalationOpenIds(project.escalationOpenId),
           },
           msg,
         )

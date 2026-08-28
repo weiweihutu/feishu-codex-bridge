@@ -22,20 +22,30 @@ export interface NoMentionProject {
   kind?: 'single' | 'multi';
   noMention?: boolean;
   defaultNoMention: boolean;
+  escalationOpenIds?: readonly string[];
 }
 
 export interface NoMentionMessage {
   content: string;
   threadId?: string;
   mentionAll: boolean;
-  mentions: Array<{ isBot?: boolean }>;
+  mentions: Array<{ isBot?: boolean; openId?: string }>;
 }
 
 export function shouldRespondWithoutMention(
   project: NoMentionProject,
   msg: NoMentionMessage,
 ): boolean {
+  if (msg.mentionAll) return false;
+  const mentionedEscalation = msg.mentions.some(
+    (mention) => project.escalationOpenIds?.includes(mention.openId ?? ''),
+  );
+  if (mentionedEscalation) return true;
   if (!(project.noMention ?? project.defaultNoMention)) return false;
-  if (msg.mentionAll || msg.mentions.some((mention) => !mention.isBot)) return false;
+  if (
+    msg.mentions.some(
+      (mention) => !mention.isBot,
+    )
+  ) return false;
   return true;
 }

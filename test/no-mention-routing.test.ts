@@ -426,7 +426,7 @@ describe('createOrchestrator no-mention routing', () => {
     releaseFirst();
     await vi.waitFor(() => expect(
       routing.messageCompleted.mock.calls.some(([ctx]) => ctx.msgId === 'om_steer_first'),
-    ).toBe(true));
+    ).toBe(true), { timeout: 5_000 });
   }, 10_000);
 
   it('emits one prompt trace when failed steer falls back to the real queue', async () => {

@@ -3,6 +3,8 @@ export interface ReplyMetadata {
   system?: string;
   knowledgeBases?: string;
   note?: string;
+  /** Machine-readable evidence persisted for self-evolution analysis. */
+  routing_evidence?: Record<string, unknown>;
 }
 
 export interface ReplyPresentation {
@@ -13,9 +15,9 @@ export interface ReplyPresentation {
 
 export type ReplyVisibilityMode = 'streaming' | 'terminal';
 
-type MetadataKey = keyof ReplyMetadata;
+type PresentationMetadataKey = 'source' | 'system' | 'knowledgeBases' | 'note';
 
-const LABELS: Record<string, MetadataKey> = {
+const LABELS: Record<string, PresentationMetadataKey> = {
   来源: 'source',
   系统: 'system',
   知识库: 'knowledgeBases',
@@ -25,7 +27,11 @@ const LABELS: Record<string, MetadataKey> = {
 const LABEL_PATTERN = /^(来源|系统|知识库|说明)\s*[:：]\s*(.*)$/;
 const SOURCE_PATTERN = /^\s*来源\s*[:：]/;
 
-function appendMetadata(metadata: ReplyMetadata, key: MetadataKey, value: string): void {
+function appendMetadata(
+  metadata: ReplyMetadata,
+  key: PresentationMetadataKey,
+  value: string,
+): void {
   const previous = metadata[key];
   metadata[key] = previous ? `${previous}\n${value}` : value;
 }
@@ -37,7 +43,7 @@ function terminalPresentation(fullText: string): ReplyPresentation {
     if (!SOURCE_PATTERN.test(lines[start] ?? '')) continue;
 
     const metadata: ReplyMetadata = {};
-    let currentKey: MetadataKey | undefined;
+    let currentKey: PresentationMetadataKey | undefined;
     let recognized = 0;
     let valid = true;
 

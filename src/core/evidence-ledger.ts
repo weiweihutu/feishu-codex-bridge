@@ -34,6 +34,8 @@ export type SkillCallStatus =
   | 'success_data'
   | 'success_empty'
   | 'not_found'
+  | 'validation_error'
+  | 'business_error'
   | 'failed'
   | 'unauthorized'
   | 'timeout'
@@ -43,15 +45,30 @@ const SKILL_STATUSES: ReadonlySet<string> = new Set([
   'success_data',
   'success_empty',
   'not_found',
+  'validation_error',
+  'business_error',
   'failed',
   'unauthorized',
   'timeout',
 ]);
 
+/** A missing input described by the producer that owns the operation contract. */
+export interface MissingParam {
+  key: string;
+  label?: string;
+  type?: string;
+  format?: string;
+  group?: string;
+  operation?: string;
+}
+
 export interface SkillCall {
   skillId: string;
   status: SkillCallStatus;
   recordCount: number | null;
+  operation?: string;
+  missingParams?: MissingParam[];
+  message?: string;
 }
 
 export type RouterIntent =
@@ -62,6 +79,14 @@ export type RouterIntent =
   | 'unsupported'
   | 'chat'
   | 'unknown';
+
+export interface KnowledgePrecheck {
+  status: string;
+  completed: boolean;
+  sourceIds?: string[];
+  evidenceCount?: number;
+  consumer?: string;
+}
 
 const ROUTER_INTENTS: ReadonlySet<string> = new Set([
   'knowledge',
@@ -75,7 +100,22 @@ const ROUTER_INTENTS: ReadonlySet<string> = new Set([
 export interface RouterDecision {
   intent: RouterIntent;
   knowledgeSources: string[];
-  missingParams: string[];
+  missingParams: MissingParam[];
+  intentId?: string;
+  skillHints?: string[];
+  executionSteps?: unknown[];
+  slots?: Record<string, unknown>;
+  terminal?: boolean;
+  allowedNextAction?: string;
+  knowledgePrecheck?: KnowledgePrecheck;
+  reason?: string;
+}
+
+export interface LedgerTraceEntry {
+  sequence: number;
+  kind: 'router' | 'gbrain' | 'skill' | 'tool';
+  status: string;
+  target: string | null;
 }
 
 export interface LedgerSnapshot {
@@ -84,6 +124,8 @@ export interface LedgerSnapshot {
   skillCalls: SkillCall[];
   /** 非 gbrain、非 Skill 的其余工具调用次数（G3 的"零工具调用"以三者合计判定）。 */
   otherToolCalls: number;
+  /** 新版 Bridge 提供；旧版调用方可省略以保持快照兼容。 */
+  executionTrace?: LedgerTraceEntry[];
 }
 
 const ROUTER_LINE = /^\s*ROUTER_DECISION:\s*(\{.*\})\s*$/m;
@@ -106,6 +148,29 @@ function stringArray(value: unknown): string[] {
     : [];
 }
 
+function missingParam(value: unknown): MissingParam | null {
+  if (typeof value === 'string' && value.length > 0) return { key: value };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  const key = ['key', 'name', 'param', 'parameter']
+    .map((candidate) => obj[candidate])
+    .find((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0);
+  if (!key) return null;
+  const result: MissingParam = { key };
+  for (const field of ['label', 'type', 'format', 'group', 'operation'] as const) {
+    if (typeof obj[field] === 'string' && obj[field]) result[field] = obj[field];
+  }
+  return result;
+}
+
+/** Accept the legacy string[] wire format and the structured missing-param format. */
+function missingParamArray(value: unknown): MissingParam[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(missingParam)
+    .filter((item): item is MissingParam => item !== null);
+}
+
 /** 从 router 工具输出提取声明行；无或非法 → null（Gate 按保守处理）。 */
 export function parseRouterDecision(output: string): RouterDecision | null {
   const match = ROUTER_LINE.exec(output);
@@ -113,10 +178,49 @@ export function parseRouterDecision(output: string): RouterDecision | null {
   const obj = parseJsonLine(match[1]);
   if (!obj) return null;
   const rawIntent = typeof obj.intent === 'string' ? obj.intent : '';
+  const rawPrecheck =
+    obj.knowledge_precheck &&
+    typeof obj.knowledge_precheck === 'object' &&
+    !Array.isArray(obj.knowledge_precheck)
+      ? (obj.knowledge_precheck as Record<string, unknown>)
+      : null;
+  const precheckStatus =
+    rawPrecheck && typeof rawPrecheck.status === 'string' ? rawPrecheck.status : '';
+  const knowledgePrecheck =
+    rawPrecheck && precheckStatus
+      ? {
+          status: precheckStatus,
+          completed:
+            typeof rawPrecheck.completed === 'boolean'
+              ? rawPrecheck.completed
+              : precheckStatus === 'completed',
+          ...(Array.isArray(rawPrecheck.source_ids)
+            ? { sourceIds: stringArray(rawPrecheck.source_ids) }
+            : {}),
+          ...(typeof rawPrecheck.evidence_count === 'number'
+            ? { evidenceCount: rawPrecheck.evidence_count }
+            : {}),
+          ...(typeof rawPrecheck.consumer === 'string'
+            ? { consumer: rawPrecheck.consumer }
+            : {}),
+        }
+      : undefined;
   return {
     intent: ROUTER_INTENTS.has(rawIntent) ? (rawIntent as RouterIntent) : 'unknown',
     knowledgeSources: stringArray(obj.knowledge_sources),
-    missingParams: stringArray(obj.missing_params),
+    missingParams: missingParamArray(obj.missing_params),
+    ...(typeof obj.intent_id === 'string' ? { intentId: obj.intent_id } : {}),
+    ...(Array.isArray(obj.skill_hints) ? { skillHints: stringArray(obj.skill_hints) } : {}),
+    ...(Array.isArray(obj.execution_steps) ? { executionSteps: obj.execution_steps } : {}),
+    ...(obj.slots && typeof obj.slots === 'object' && !Array.isArray(obj.slots)
+      ? { slots: obj.slots as Record<string, unknown> }
+      : {}),
+    ...(typeof obj.terminal === 'boolean' ? { terminal: obj.terminal } : {}),
+    ...(typeof obj.allowed_next_action === 'string'
+      ? { allowedNextAction: obj.allowed_next_action }
+      : {}),
+    ...(knowledgePrecheck ? { knowledgePrecheck } : {}),
+    ...(typeof obj.reason === 'string' ? { reason: obj.reason } : {}),
   };
 }
 
@@ -131,6 +235,15 @@ export function parseSkillEvidence(output: string): SkillCall[] {
       skillId: obj.skill_id,
       status: SKILL_STATUSES.has(rawStatus) ? (rawStatus as SkillCallStatus) : 'unknown',
       recordCount: typeof obj.record_count === 'number' ? obj.record_count : null,
+      ...(typeof obj.operation === 'string' && obj.operation
+        ? { operation: obj.operation }
+        : {}),
+      ...(Array.isArray(obj.missing_params)
+        ? { missingParams: missingParamArray(obj.missing_params) }
+        : {}),
+      ...(typeof obj.message === 'string' && obj.message
+        ? { message: obj.message }
+        : {}),
     });
   }
   return calls;
@@ -181,6 +294,8 @@ export class EvidenceLedger {
   private skillCalls: SkillCall[] = [];
   private otherToolCalls = 0;
   private routerDecision: RouterDecision | null = null;
+  private executionTrace: LedgerTraceEntry[] = [];
+  private sequence = 0;
   private readonly now: () => number;
 
   constructor(now: () => number = Date.now) {
@@ -237,6 +352,12 @@ export class EvidenceLedger {
         undeclaredSource: false, // resolved in snapshot() once router decision is known
         elapsedMs: started ? this.now() - started.startedAt : null,
       });
+      this.executionTrace.push({
+        sequence: ++this.sequence,
+        kind: 'gbrain',
+        status,
+        target: started?.sourceId ?? null,
+      });
       return;
     }
 
@@ -245,15 +366,35 @@ export class EvidenceLedger {
       const decision = parseRouterDecision(output);
       if (decision) {
         this.routerDecision = decision;
+        this.executionTrace.push({
+          sequence: ++this.sequence,
+          kind: 'router',
+          status: 'declared',
+          target: decision.intentId ?? null,
+        });
         return; // router 执行本身不计入"其他工具调用"
       }
     }
     const skills = parseSkillEvidence(output);
     if (skills.length > 0) {
       this.skillCalls.push(...skills);
+      for (const skill of skills) {
+        this.executionTrace.push({
+          sequence: ++this.sequence,
+          kind: 'skill',
+          status: skill.status,
+          target: skill.skillId,
+        });
+      }
       return;
     }
     this.otherToolCalls += 1;
+    this.executionTrace.push({
+      sequence: ++this.sequence,
+      kind: 'tool',
+      status: failed ? 'failed' : 'completed',
+      target: event.toolType ?? null,
+    });
   }
 
   snapshot(): LedgerSnapshot {
@@ -268,6 +409,7 @@ export class EvidenceLedger {
       gbrainCalls,
       skillCalls: [...this.skillCalls],
       otherToolCalls: this.otherToolCalls,
+      executionTrace: [...this.executionTrace],
     };
   }
 }
@@ -283,6 +425,8 @@ const SKILL_STATUS_LABEL: Record<SkillCallStatus, string> = {
   success_data: '成功',
   success_empty: '返回为空',
   not_found: '系统确认不存在',
+  validation_error: '参数校验失败',
+  business_error: '业务失败',
   failed: '失败',
   unauthorized: '无权限',
   timeout: '超时',

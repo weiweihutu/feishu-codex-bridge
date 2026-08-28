@@ -10,6 +10,7 @@ import {
   buildSourceBlock,
   effectiveGbrainHits,
   effectiveSkillEvidence,
+  type MissingParam,
   type LedgerSnapshot,
 } from './evidence-ledger';
 import { parseReplyPresentation } from './reply-visibility';
@@ -81,11 +82,51 @@ function needHuman(replyText: string): boolean {
   return replyText.includes(NEED_HUMAN_MARK);
 }
 
+function missingParams(snapshot: LedgerSnapshot): MissingParam[] {
+  const all = [
+    ...(snapshot.routerDecision?.missingParams ?? []),
+    ...snapshot.skillCalls.flatMap((call) => call.missingParams ?? []),
+  ];
+  const byKey = new Map<string, MissingParam>();
+  for (const param of all) {
+    const existing = byKey.get(param.key);
+    if (!existing) {
+      byKey.set(param.key, { ...param });
+      continue;
+    }
+    byKey.set(param.key, {
+      ...existing,
+      ...Object.fromEntries(
+        (['label', 'type', 'format', 'group', 'operation'] as const)
+          .filter((field) => !existing[field] && param[field])
+          .map((field) => [field, param[field]]),
+      ),
+    });
+  }
+  return [...byKey.values()];
+}
+
+function missingParamsText(params: MissingParam[]): string {
+  return params
+    .map((param) => {
+      const label = param.label?.trim() || param.key;
+      const details = [
+        param.type ? `类型：${param.type}` : '',
+        param.format ? `格式：${param.format}` : '',
+      ].filter(Boolean);
+      return details.length > 0 ? `${label}（${details.join('，')}）` : label;
+    })
+    .join('、');
+}
+
 /** 降级正文不含 [NEED_HUMAN]——标记由 applyAnswerGate 追加到来源块之后，
  * 这样 split_reply_visibility 会把它归入元数据区而不是用户可见正文。 */
 function degradeBodyNoEvidence(snapshot: LedgerSnapshot): string {
-  const entities = snapshot.routerDecision?.missingParams ?? [];
-  const hint = entities.length > 0 ? entities.join('、') : '可定位的业务信息（如订单号、店铺、SKU）';
+  const params = missingParams(snapshot);
+  const hint =
+    params.length > 0
+      ? missingParamsText(params)
+      : '可定位的业务信息（如订单号、店铺、SKU）';
   return [
     '结论：当前授权知识库和业务能力中没有找到能直接支持该问题的依据，为避免误导不作推测性回答，本条需人工回复。',
     '',
@@ -101,9 +142,43 @@ function degradeBodyToolFailed(): string {
   ].join('\n');
 }
 
+function routerSystemFailure(snapshot: LedgerSnapshot): string | null {
+  const decision = snapshot.routerDecision;
+  if (!decision) return null;
+
+  const precheck = decision.knowledgePrecheck;
+  const precheckIncomplete =
+    precheck !== undefined &&
+    !precheck.completed &&
+    !['completed', 'no_hit'].includes(precheck.status);
+  const legacyPrecheckMessage = decision.missingParams.some((param) =>
+    param.key.includes('知识库预检索完成后才能继续'),
+  );
+  const explicitlyBlocked =
+    decision.reason?.includes('知识库预检索') ||
+    (decision.terminal === true &&
+      decision.allowedNextAction === 'ask_clarification' &&
+      decision.missingParams.length === 0 &&
+      precheckIncomplete);
+
+  if (precheckIncomplete && explicitlyBlocked) {
+    return `knowledge precheck ${precheck.status}`;
+  }
+  if (legacyPrecheckMessage) return 'legacy knowledge precheck block';
+
+  const toolCalls =
+    snapshot.gbrainCalls.length +
+    snapshot.skillCalls.length +
+    snapshot.otherToolCalls;
+  if (decision.terminal === true && toolCalls > 0) {
+    return 'terminal router decision followed by tool execution';
+  }
+  return null;
+}
+
 function degradeBodyClarify(snapshot: LedgerSnapshot): string {
-  const params = snapshot.routerDecision?.missingParams ?? [];
-  const ask = params.length > 0 ? params.join('、') : '定位该问题所需的具体业务信息';
+  const params = missingParams(snapshot);
+  const ask = params.length > 0 ? missingParamsText(params) : '定位该问题所需的具体业务信息';
   return `请提供 ${ask}，我再继续核查。`;
 }
 
@@ -120,6 +195,18 @@ export function evaluateGate(input: GateInput, switches: GateRuleSwitches = {}):
   // G5：模型诚实转人工 → 放行（现有 NEED_HUMAN 机制接手）。
   if (needHuman(replyText)) {
     return { decision: 'pass', rule: 'G5', reasons: ['model self-escalated'], degradedBody: null };
+  }
+
+  // G4：系统编排失败不能伪装成用户缺参。包括知识库预检未完成、旧版
+  // ROUTER_DECISION 将系统提示错误写入 missing_params，以及终止路由后仍继续调用工具。
+  const systemFailure = routerSystemFailure(snapshot);
+  if (on('g4') && systemFailure) {
+    return {
+      decision: 'degrade_tool_failed',
+      rule: 'G4',
+      reasons: [systemFailure],
+      degradedBody: degradeBodyToolFailed(),
+    };
   }
 
   // G4：router 要求追问，模型却直接作答。
@@ -141,6 +228,7 @@ export function evaluateGate(input: GateInput, switches: GateRuleSwitches = {}):
   const gbrainHadFailure = snapshot.gbrainCalls.some(
     (c) => c.status === 'failed' || c.status === 'parse_failed',
   );
+  const requiredParams = missingParams(snapshot);
 
   // G3：非闲聊/非追问意图，却零工具调用 —— 纯常识作答。
   if (
@@ -164,6 +252,14 @@ export function evaluateGate(input: GateInput, switches: GateRuleSwitches = {}):
     if (!gbrainAttempted) reasons.push('gbrain never called');
     else if (gbrainHadFailure) reasons.push('gbrain calls failed');
     else reasons.push('gbrain success but zero relevant hits');
+    if (requiredParams.length > 0) {
+      return {
+        decision: 'degrade_clarify',
+        rule: 'G1',
+        reasons: [...reasons, 'required parameters are missing'],
+        degradedBody: degradeBodyClarify(snapshot),
+      };
+    }
     // mixed 意图下 Skill 证据可独立支撑实时部分；仅当两路都无效时才降级。
     if (intent !== 'mixed' || skillOk.length === 0) {
       const toolFailed = gbrainHadFailure && gbrainAttempted;
@@ -180,6 +276,14 @@ export function evaluateGate(input: GateInput, switches: GateRuleSwitches = {}):
   if (on('g2') && (intent === 'realtime' || intent === 'mixed') && skillOk.length === 0) {
     // mixed 下知识命中可独立支撑知识部分；仅当两路都无效时才降级（上面 G1 已覆盖
     // 双无效场景，此处只拦 realtime 单意图）。
+    if (requiredParams.length > 0) {
+      return {
+        decision: 'degrade_clarify',
+        rule: 'G2',
+        reasons: ['mixed: realtime leg has no valid skill evidence', 'required parameters are missing'],
+        degradedBody: degradeBodyClarify(snapshot),
+      };
+    }
     if (intent === 'realtime') {
       return {
         decision: 'degrade_tool_failed',
